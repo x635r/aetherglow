@@ -135,7 +135,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
           <HeroStat
             label="二烧概率"
             value={`${Math.round(p.timeline.afterglowProbability * 100)}%`}
-            sub={`+${p.timeline.afterglowWindow.fromMin}~${p.timeline.afterglowWindow.toMin}min`}
+            sub={afterglowRange(p.timeline.afterglowWindow.fromMin, p.timeline.afterglowWindow.toMin)}
           />
           <HeroStat
             label="持续时长"
@@ -281,6 +281,16 @@ function WarnIcon() {
 function compass(deg: number): string {
   const n = ['北', '东北', '东', '东南', '南', '西南', '西', '西北'];
   return n[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+}
+
+/**
+ * 二烧窗口显示。分钟偏移可能为负（窗口起点早于日落），
+ * 需要逐项加符号，不能只在整个区间前加一个 "+"。
+ */
+function afterglowRange(fromMin: number, toMin: number): string {
+  const f = fromMin > 0 ? `+${fromMin}` : `${fromMin}`;
+  const t = toMin > 0 ? `+${toMin}` : `${toMin}`;
+  return `${f}~${t} min`;
 }
 
 function stageName(a: number): string {
