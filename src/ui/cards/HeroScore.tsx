@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { GRADE_THEME } from '../../engine/constants';
+import { GRADE_THEME, VIVIDNESS_CEILING } from '../../engine/constants';
 import type { SunsetPredictionOutput } from '../../engine/types';
 import { localClock } from '../../engine/SunsetPhysicsEngine';
 import { AnimatedNumber, Bar, InfoTip } from '../primitives';
@@ -16,8 +16,8 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
 
   const sunLabel = p.mode === 'sunset' ? '日落' : '日出';
 
-  // 边界：鲜艳度在 0~2.6 的进度
-  const vividPct = Math.min(p.vividness / 2.6, 1);
+  // 边界：鲜艳度进度（分母统一用 VIVIDNESS_CEILING，与其余卡片一致）
+  const vividPct = Math.min(p.vividness / VIVIDNESS_CEILING, 1);
   const scorePct = p.score / 100;
 
   return (
@@ -41,7 +41,13 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               {p.locationLabel}
             </h1>
             <p className="num mt-1 text-[11px] text-white/55">
-              {sunLabel} {eventClock} · 峰值 {clock} · {theme.toneName}
+              {p.eventExists ? (
+                <>{sunLabel} {eventClock} · 峰值 {clock} · {theme.toneName}</>
+              ) : (
+                <span className="text-amber-200/90">
+                  本日无{sunLabel}（极昼 / 极夜）· 以下数值为兜底结果，不可作为拍摄依据
+                </span>
+              )}
             </p>
           </div>
 
@@ -61,7 +67,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
           <div>
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
               鲜艳度指数
-              <InfoTip text="Vividness Index 0.00–2.50+。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
+              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的可达上限约 1.15）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
             </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span
@@ -70,7 +76,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               >
                 <AnimatedNumber value={p.vividness} digits={2} />
               </span>
-              <span className="num pb-1.5 text-sm font-medium text-white/45">/ 2.50</span>
+              <span className="num pb-1.5 text-sm font-medium text-white/45">/ {VIVIDNESS_CEILING.toFixed(2)}</span>
             </div>
 
             <div className="mt-2.5 w-[190px] sm:w-[250px]">
@@ -96,6 +102,37 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               </div>
               <div className="mt-1.5 w-20">
                 <Bar value={scorePct} max={1} color="rgba(255,255,255,0.85)" height={4} />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
+                会烧概率
+                <InfoTip text="P(会烧)：达到「小烧」及以上的估计概率。与下方「若烧多强」是两个独立的头 —— 把二者压进一个分数，会让「高概率小烧」和「低概率大烧」无法区分。当前为未校准估计（calibration=0）。" />
+              </div>
+              <div className="mt-1 flex items-baseline gap-1">
+                <span className="num text-2xl font-semibold leading-none text-white sm:text-3xl">
+                  {Math.round(p.dual.burnProbability * 100)}
+                </span>
+                <span className="text-xs text-white/45">%</span>
+                <span
+                  className="ml-1 rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+                  style={{
+                    background:
+                      p.dual.advisory === 'go'
+                        ? 'rgba(56,232,208,0.20)'
+                        : p.dual.advisory === 'watch'
+                          ? 'rgba(255,179,64,0.20)'
+                          : 'rgba(255,255,255,0.10)',
+                    color:
+                      p.dual.advisory === 'go' ? '#38e8d0' : p.dual.advisory === 'watch' ? '#ffb340' : 'rgba(255,255,255,0.55)',
+                  }}
+                >
+                  {p.dual.advisory === 'go' ? '值得去' : p.dual.advisory === 'watch' ? '可观察' : '不建议'}
+                </span>
+              </div>
+              <div className="mt-1.5 w-20">
+                <Bar value={p.dual.burnProbability} max={1} color="rgba(255,255,255,0.55)" height={3} />
               </div>
             </div>
 
@@ -304,5 +341,5 @@ function stageName(a: number): string {
 }
 
 export function useHeroMemo(p: SunsetPredictionOutput) {
-  return useMemo(() => ({ vividPct: Math.min(p.vividness / 2.6, 1) }), [p.vividness]);
+  return useMemo(() => ({ vividPct: Math.min(p.vividness / VIVIDNESS_CEILING, 1) }), [p.vividness]);
 }

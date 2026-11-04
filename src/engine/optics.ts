@@ -169,7 +169,65 @@ export function curvatureDropM(distKm: number): number {
 
 // ── 气柱质量与消光 ──────────────────────────────────────────────────────
 
-/** 沿光路的相对气柱质量（垂直=1）。光线触地即停止积分。 */
+/**
+ * 光束沿路的最近距地高度（切点高度，m）。
+ *
+ * 对 MSL 高度 h、太阳视高度角 α 的平行光，光束高度随朝太阳方向的水平距离 s 变化：
+ *
+ *     h(s) = h + s·tan(α) + s²/(2·R_eff)
+ *
+ * 极小值出现在 s = −tan(α)·R_eff 处，代入得
+ *
+ *     h_t = h − R_eff·α²/2      （α ≥ 0 时光束一路上升，切点即云层本身）
+ *
+ * **这就是整个黄昏颜色物理的核心几何量**：α 越负，切点越低，气柱越长、红光越纯。
+ * h_t ≤ 0 表示光束已被地球本体遮挡 —— 此时云层只可能被散射光（而非直射光）照亮。
+ */
+export function beamTangentHeightM(cloudMslM: number, alphaDeg: number): number {
+  if (alphaDeg >= 0) return Math.max(cloudMslM, 0);
+  const dropM = 0.5 * R_EFF_KM * 1000 * Math.pow(toRad(alphaDeg), 2);
+  return cloudMslM - dropM;
+}
+
+/**
+ * 相对气柱质量（垂直=1）。
+ *
+ * 两条物理约束必须同时满足，缺一就会得到「太阳越低反而越亮」的荒谬结果：
+ *
+ *  ① **斜程因子**
+ *     · α > 0：Kasten–Young (1989) 经验式（含曲率与折射，α→0 收敛到 38 而非发散）
+ *     · α ≤ 0：切点气柱的 Chapman 渐近式 m = √(πR/2H)·exp(−h_t/H)，
+ *       h_t 见 `beamTangentHeightM`。它在 h_t=0 时恰为 35.4，与 Kasten–Young
+ *       的 38 天然衔接，所以不需要人工拼缝。
+ *  ② **高度衰减** —— 云层越高，其上方剩余气柱越少，比例 exp(−h_t/H)。
+ *
+ * 只做 ① 会把整根数百公里光柱都当成在云层高度上（α<0 时高估 2–3 倍）；
+ * 只做 ② 会在太阳高挂时也给出巨大气柱。两者相乘才是对的。
+ */
+export function beamAirmass(cloudMslM: number, alphaDeg: number, scaleHeightKm: number): number {
+  const tangentM = beamTangentHeightM(cloudMslM, alphaDeg);
+  const hKm = Math.max(tangentM, 0) / 1000;
+
+  // 光束被地球本体完全遮挡：给一个足够大的气柱，让 exp(−τ) 收敛到 0
+  if (tangentM <= 0) return 220;
+
+  // 沿切点的相对气柱。系数 38 与 Kasten–Young 在 α=0 处的 38 精确相等，
+  // 所以 α 穿过地平线时**天然连续、且全局单调**，不需要任何分段拼接。
+  // （这与 Skyglow 的 `m_ray = 38.0 * exp(-h_t / 7.5)` 完全一致，
+  //   两个独立实现收敛到同一个常数，是它可靠的一个旁证。）
+  const grazing = 38 * Math.exp(-hKm / scaleHeightKm);
+
+  if (alphaDeg >= 0) {
+    // 太阳在地平线以上：用 Kasten–Young 更准；它在 α→0 时正是 38
+    return kastenYoungAirmass(alphaDeg) * Math.exp(-hKm / scaleHeightKm);
+  }
+  return grazing;
+}
+
+/**
+ * 沿光路的相对气柱质量（垂直=1）。**保留用于诊断绘图**；
+ * 物理消光请用 `beamAirmass`（解析式，单调且不受截断距离影响）。
+ */
 export function slantAirmass(
   rayHeightFn: (dKm: number) => number,
   maxDistKm: number,
@@ -304,29 +362,62 @@ export function airmassCapForCover(cover01: number): number {
  * 物理链条：
  *   τ_slab = τ_vert · X,   X = min(pathKm/thicknessKm, X_max(cover))
  *
+ * **必须对几何路径做软启动**。原因：光路 h(d) 是抛物线，当 α 刚好从正值
+ * 变为负值，落在某个薄带（如 700hPa 厚 1.4km）内的路径长度会从 0 突变到
+ * 近 200km —— 而同一时刻相邻帧只差 0.4°，τ 却从 0 跳到 104，
+ * 直接造成时间曲线上的硬台阶。
+ *
+ * 真实的云层不是无限薄的平面：它有一定厚度与水平尺度，光线是逐渐"进入"
+ * 掠射状态的。这里用 `AIRMASS_ONSET_KM`（约一个典型云块宽度）做线性渐入，
+ * 使其在几何上连续。
+ *
  * @param thicknessKm 该层的总厚度 (km)
  * @param pathKm      光路在该层内的几何路径长度 (km)
  * @param cap         气团上限（由 `airmassCapForCover` 给出）
  */
+export const AIRMASS_ONSET_KM = 25;
+
 export function slabAirmass(thicknessKm: number, pathKm: number, cap = AIRMASS_CAP): number {
   if (thicknessKm <= 0 || pathKm <= 0) return 1;
-  return clamp(pathKm / thicknessKm, 1, cap);
+  // 几何气团因子：路径短于厚度时按垂直处理（1），长则按比值放大并受 cap 约束
+  const geo = clamp(pathKm / thicknessKm, 1, cap);
+  // 软启动：路径越长说明越接近掠射，渐入到完整几何值。
+  // 少了这一步，α 从 +0.1° 变到 −0.1° 时薄层的 pathKm 会从 0 跳到近 200km，
+  // τ 从 0 跳到 104，时间曲线出现硬台阶。
+  const onset = smoothRamp(pathKm, AIRMASS_ONSET_KM);
+  return 1 + (geo - 1) * onset;
+}
+
+/** 把 x 从 0→onset 映射到 0→1 的平滑阶跃（用于消除几何突变） */
+function smoothRamp(x: number, onset: number): number {
+  if (onset <= 0) return 1;
+  const t = clamp(x / onset, 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 
-/** 目标云层朝太阳方向的直射光气柱质量与有效光程 */
+/**
+ * 目标云层朝太阳方向的直射光气柱质量与有效光程。
+ *
+ * **口径说明（上一版的主要物理错误）**：不能用「从云层出发朝太阳积分、撞地即停」的方式
+ * 求气柱。那样在 α 刚好越过云层地平线时会因触地截断而**突然变小**，于是算出的
+ * 直射光颜色在 α≈−1.8° 最暗、α=−6° 反而最亮（相差 5 个数量级），与实拍完全相反。
+ *
+ * 正确的量是**与地球相切的那条日光光束在切点高度上的气柱**（见 `beamTangentHeightM`）：
+ * 它随 α 单调递减，且在 α→−√(2h/R) 处自然收敛到 0（云层入影），无需任何特判。
+ */
 export function directBeamAirmass(
   cloudMslM: number,
   alphaDeg: number,
-  maxDistKm = 450,
+  maxDistKm = 900,
 ): { rayleigh: number; aerosol: number; rangeKm: number } {
-  const hit = groundHitDistanceKm(cloudMslM, alphaDeg);
-  const rangeKm = Math.min(hit, maxDistKm);
-  const hAt = (d: number) => rayHeightM(cloudMslM, alphaDeg, d) / 1000;
+  const tangentM = beamTangentHeightM(cloudMslM, alphaDeg);
+  // 光束几何可达的水平半程 L/2 = √(2·R_eff·h_t)；乘 2 得往返全程
+  const reachKm = tangentM > 0 ? 2 * Math.sqrt(2 * R_EFF_KM * (tangentM / 1000)) : 0;
   return {
-    rayleigh: slantAirmass(hAt, rangeKm, H_RAYLEIGH, 2.5),
-    aerosol: slantAirmass(hAt, rangeKm, H_AEROSOL, 2.5),
-    rangeKm,
+    rayleigh: beamAirmass(cloudMslM, alphaDeg, H_RAYLEIGH),
+    aerosol: beamAirmass(cloudMslM, alphaDeg, H_AEROSOL),
+    rangeKm: Math.min(reachKm, maxDistKm),
   };
 }
 
@@ -387,6 +478,32 @@ export function levelVerticalTau(levelKey: string, cover01: number): number {
 
 
 /**
+ * 臭氧 Chappuis 带吸收系数（相对 550nm 的单位气柱光学厚度）。
+ *
+ * Chappuis 带覆盖 400–650nm，双峰在 575 / 603nm（Orphal, Staehelin & Tamminen 2016,
+ * J. Mol. Spectrosc. 327:105, DOI 10.1016/j.jms.2016.07.007）。
+ *
+ * **为什么必须单独建模**：垂直气柱下 Chappuis 吸收弱到可以忽略（约 0.02），
+ * 这是几乎所有同类项目直接跳过它的原因。但黄昏时日光沿切点扫过臭氧层，
+ * 气柱可达垂直值的 10–40 倍 —— 此时它在 570–620nm 窗口变成主导项，
+ * 正是蓝调时刻与地影蓝边的物理来源。忽略它 = 橙色对、蓝色全错。
+ *
+ * 以 550nm 为 1.0 归一化；603nm 峰与 575nm 峰同高，470nm 以下迅速消失。
+ */
+export function ozoneExtinctionRel(nm: number): number {
+  if (nm < 380 || nm > 720) return 0;
+  // 双高斯叠加，峰值归一到 1.0（550nm 处约 0.62）。
+  // 400nm 与 700nm 处各加一个线性收窗，避免带外出现残余吸收。
+  const g1 = Math.exp(-0.5 * Math.pow((nm - 575) / 27, 2));
+  const g2 = Math.exp(-0.5 * Math.pow((nm - 603) / 30, 2));
+  const tail = Math.min(1, Math.max(0, (nm - 400) / 30)) * Math.min(1, Math.max(0, (700 - nm) / 60));
+  return (0.86 * g1 + 0.9 * g2) * tail;
+}
+
+/** 550nm 垂直臭氧光学厚度（300 DU 标准柱 ≈ 0.021） */
+export const TAU_O3_550 = 0.021;
+
+/**
  * 直射太阳光到达目标云层后的 RGB 透过率（0~1）。
  * 三通道分开积分 → 色相与饱和度是算出来的，不是配出来的。
  */
@@ -405,8 +522,8 @@ export function directSunRgb(
     const lam = LAMBDA[ch] / 550;
     const tauRay = TAU_R550 * Math.pow(lam, -4) * rayleigh;
     const tauAer = aod * hygro * Math.pow(lam, -angstrom) * aerosol;
-    // 臭氧 Chappuis 带（简化）：绿/蓝波段轻微额外吸收，抬升红色纯度
-    const tauO3 = ch === 'g' ? 0.012 * Math.min(rayleigh, 12) : ch === 'b' ? 0.008 * Math.min(rayleigh, 12) : 0;
+    // 臭氧：与 Rayleigh 同样沿切点气柱放大；绿/蓝通道在黄昏被显著吃掉
+    const tauO3 = TAU_O3_550 * ozoneExtinctionRel(LAMBDA[ch]) * rayleigh;
     rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
   }
   return { rgb, rayleighAirmass: rayleigh, aerosolAirmass: aerosol, rangeKm };

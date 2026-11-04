@@ -276,10 +276,14 @@ export function renderSection(
 
   // 该层是否已经沉入地影 / 光路极短：此时不该画一条象征性的短光线，
   // 而应明确告诉用户「这一层此刻不烧，另有一层还在受光」。
+  //
+  // **不要再拿 `section.ray.transmittance` 做判据**。那是"有效照明度"，
+  // 含黄昏散射分量，太阳越低反而越高；旧代码用 `exp(−τ_full)` 时它恒为
+  // ~1e−11，于是剖面图永远判定"已入地影"，连光路和太阳都一个不画 ——
+  // 这是本产品主视觉功能失效的直接原因。
+  // 正确的判据只看这一层此刻是否真的受光（`cloudLitFactor`）。
   const focusLit = section.levels.find((l) => l.key === focusLevel)?.lit ?? 0;
-  // 判据：目标层几乎不受光，或光线还没走远就撞地/撞山
-  const shadowed =
-    focusLit < 0.3 || rayPoints.length < 3 || maxReach < 60 || section.ray.transmittance < 0.02;
+  const shadowed = focusLit < 0.15 || rayPoints.length < 3 || maxReach < 60;
 
   if (rayPoints.length > 1 && !shadowed) {
     const path = () => {
@@ -560,7 +564,7 @@ export function renderSection(
   // ══ 11. 角标信息 ══════════════════════════════════════════════════════
   const info = `α ${alpha >= 0 ? '+' : ''}${alpha.toFixed(2)}°  ${LEVEL_BY_KEY[focusLevel].hpa}hPa  τ ${section.ray.opticalDepth
     .toFixed(2)
-    .padStart(4, '0')}  远端 T ${((section.ray.transmittance || 0) * 100).toFixed(0)}%`;
+    .padStart(4, '0')}  受光 ${((section.levels.find((l) => l.key === focusLevel)?.lit ?? 0) * 100).toFixed(0)}%`;
   ctx.font = '600 9.5px "JetBrains Mono", monospace';
   const iw = ctx.measureText(info).width + 15;
   roundRect(ctx, padL + plotW - iw - 4, padT + 5, iw, 19, 6);

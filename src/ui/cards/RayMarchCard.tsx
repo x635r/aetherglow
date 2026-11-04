@@ -193,14 +193,14 @@ export function RayMarchCard() {
       <div className="mt-3">
         <div className="flex items-center justify-between text-[10px] text-slate-400">
           <span className="num font-medium">
-            日{sunWord}前 20 分
+            {sunWord}前 20 分
           </span>
           <button
             type="button"
             onClick={() => setScrub(0)}
             className="rounded-md border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[9.5px] text-slate-300 transition-colors hover:border-amber-300/40 hover:text-amber-200"
           >
-            对齐{sunWord} 00:00
+            对齐 {sunWord}时刻
           </button>
           <span className="num font-medium">后 40 分</span>
         </div>

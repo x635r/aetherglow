@@ -68,6 +68,10 @@ const DEFAULT_QUERY: Query = {
   models: ['ecmwf', 'gfs', 'icon'],
 };
 
+/** 请求序号与取消句柄（模块级，不属于 UI 状态） */
+let loadSeq = 0;
+let inflightAbort: AbortController | null = null;
+
 export const useStore = create<Store>((set, get) => ({
   query: DEFAULT_QUERY,
   status: 'idle',
@@ -135,6 +139,14 @@ export const useStore = create<Store>((set, get) => ({
 
   load: async (opts) => {
     const { query } = get();
+    // 请求序号 + AbortController：快速切换城市时，先发后到的响应不能覆盖新结果。
+    // 上一版完全没有这层保护（`signal` 参数传到数据层也被丢弃）。
+    loadSeq++;
+    const mySeq = loadSeq;
+    inflightAbort?.abort();
+    const ac = new AbortController();
+    inflightAbort = ac;
+
     set({ status: 'loading', error: null });
     try {
       const res = await loadForecastBundle({
@@ -143,6 +155,7 @@ export const useStore = create<Store>((set, get) => ({
         mode: query.mode,
         models: query.models,
         force: opts?.force,
+        signal: ac.signal,
       });
       const resolved = resolveEvent(query.point, query.dateISO, query.mode);
       set({
@@ -156,6 +169,8 @@ export const useStore = create<Store>((set, get) => ({
       });
       get().recompute();
     } catch (e) {
+      // 被后续请求取消的旧请求：静默丢弃，不要把 stale error 显示给用户
+      if (mySeq !== loadSeq || (e as Error).name === 'AbortError') return;
       set({ status: 'error', error: (e as Error).message });
     }
   },
@@ -178,6 +193,7 @@ export const useStore = create<Store>((set, get) => ({
           sunriseMs: query.mode === 'sunrise' ? resolved.eventMs : null,
           sunsetMs: query.mode === 'sunset' ? resolved.eventMs : null,
         },
+        eventExists: resolved.exists,
         compareModels: query.models,
       });
       set({ prediction: pred });

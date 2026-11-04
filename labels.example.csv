@@ -1,0 +1,9 @@
+# 实测标签示例（请替换成你自己的记录）
+# label 可用 SunsetBot 六档中文/英文，或 none/faint/minor/moderate/major/extreme/epic
+# 采集建议：同一地点、连续日期，至少 100 天；≥3 位独立评分者并统计一致性(κ)
+date,lat,lon,mode,label
+2026-06-24,31.2304,121.4737,sunset,major
+2026-06-25,31.2304,121.4737,sunset,none
+2026-06-26,31.2304,121.4737,sunset,minor
+2026-06-27,31.2304,121.4737,sunset,moderate
+2026-06-28,31.2304,121.4737,sunset,faint

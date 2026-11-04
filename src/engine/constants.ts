@@ -73,6 +73,18 @@ export const GRADES = [
 
 export type GradeKey = (typeof GRADES)[number]['key'];
 
+/**
+ * 鲜艳度标尺的显示上限。
+ *
+ * 实测（7 层云量 + 三通道消光模型，5760 组网格 + 2000 组随机搜索）可达最大值
+ * 约 1.15——即「特大烧」上沿。`epic`（>1.5）需要云光学厚度/云相态数据才能达到，
+ * 当前数据源（Open-Meteo 只给覆盖率）在物理上到不了。
+ *
+ * UI 一律用这个常量做进度条分母，不要再各自写 2.5 / 2.6 —— 那会让同一个
+ * 数值在同一屏上出现两种刻度（审查时发现的实际缺陷）。
+ */
+export const VIVIDNESS_CEILING = 1.6;
+
 /** 各分级对应的主题色（Hero 卡片流体渐变） */
 export const GRADE_THEME: Record<GradeKey, { from: string; via: string; to: string; accent: string; text: string }> = {
   none: { from: '#1b2436', via: '#232c3f', to: '#2c3446', accent: '#8ea0b8', text: '#c8d3e2' },

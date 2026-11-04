@@ -45,6 +45,15 @@ export interface AerosolSample {
   pm25: number;
   pm10: number;
   humidity: number;
+  /**
+   * 该时刻的 AOD 是否为**真实观测值**。
+   *
+   * 上一版把 null 直接填成 0.22 常量，而 `sampleAerosol` 只看数组长度，
+   * 于是"空气质量接口只覆盖到 +6 天、之后全是 null"会被判成"有数据"，
+   * 界面显示 `AOD 0.22 / 通透`，其实是编的。
+   * 必须把 null 语义保留到引擎层，让 available=false + confidence 下降。
+   */
+  aodValid?: boolean;
 }
 
 export interface RingAerosol {
@@ -133,7 +142,7 @@ export interface RingReport {
 
 export interface VetoFlag {
   active: boolean;
-  kind: 'cloud-wall' | 'terrain' | 'low-cloud-lock' | 'fog' | 'overcast' | 'none';
+  kind: 'cloud-wall' | 'terrain' | 'low-cloud-lock' | 'fog' | 'haze' | 'overcast' | 'none';
   title: string;
   detail: string;
   /** 惩罚系数 */
@@ -196,10 +205,37 @@ export interface SkyColorTheme {
   toneName: string;
 }
 
+/**
+ * 双头输出：把「会不会烧」和「烧多大」拆开。
+ *
+ * 依据（两套独立验证都指向同一结论）：
+ *  · SunsetBot 自公布混淆矩阵：不烧类 93.7% 正确，其余五档只有 5–48%
+ *  · Skyglow 严格 train/test：AUC 0.797，但 Brier 0.167 vs 基础率 0.1695
+ * 即：**所有系统的技能都集中在"不烧"这一侧**，把二者混进一个 0–2.5 连续值
+ * 再硬切 7 档，会让"高概率小烧"和"低概率大烧"无法区分。
+ *
+ * 拆开后：
+ *  · `burnProbability` 用 Brier + reliability + AUC + TSS 评估
+ *  · `gradeIfBurn`   用 Spearman + 相邻档准确率评估
+ * 两者都必须在**按日期分组**的测试集上评估（同日数据高度自相关）。
+ */
+export interface DualHeadEstimate {
+  /** P(会烧) —— 二分类概率 0~1，本日峰值鲜艳度 > 微微烧门槛的估计概率 */
+  burnProbability: number;
+  /** 「若会烧，烧多大」的条件强度 0~1.6+（与 burnProbability 独立） */
+  gradeIfBurn: number;
+  /** 建议行动档：none / watch / go —— 供 UI 直接消费 */
+  advisory: 'none' | 'watch' | 'go';
+  /** 该估计的样本外可靠度 0~1（未校准时为 0，接了实测标签后由拟合给出） */
+  calibration: number;
+}
+
 export interface SunsetPredictionOutput {
   // ── 核心量化 ────────────────────────────────
-  /** 鲜艳度指数 0.00 ~ 2.50+ */
+  /** 鲜艳度指数 0.00 ~ 1.6+（当前数据模型可达上限约 1.15） */
   vividness: number;
+  /** 双头估计（会不会烧 / 烧多大） */
+  dual: DualHeadEstimate;
   /** 0~100 百分制 */
   score: number;
   grade: GradeKey;
@@ -245,6 +281,12 @@ export interface SunsetPredictionOutput {
 
   tactical: TacticalAdvice;
   theme: SkyColorTheme;
+
+  /**
+   * 该本地日是否真的存在日出/日落。
+   * false = 极夜/极昼，此时所有数值都是兜底结果，UI 应显示提示而非预报。
+   */
+  eventExists: boolean;
 
   /** 预测生成时间与模型主源 */
   generatedAt: number;

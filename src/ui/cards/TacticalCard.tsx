@@ -18,16 +18,21 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   const h = query.observerHeightM;
 
   const lowBase = useMemo(() => {
-    // 用 925/850 层高度做低云参考
+    // 用 925/850 层高度做低云参考（MSL）
     const l925 = p.layers.find((l) => l.key === '925')?.altitudeM ?? 780;
     const l850 = p.layers.find((l) => l.key === '850')?.altitudeM ?? 1500;
     return Math.min(l925, l850);
   }, [p.layers]);
 
-  const aboveLow = h > lowBase;
+  // **必须用 MSL 比较，不能用 AGL**。
+  // 上一版写的是 `h > lowBase`（AGL 对 MSL），于是拉萨这类高原城市
+  // （地面 3650m、机位 AGL=0、低云约 780m MSL）会显示「低云之下」，
+  // 而实际已高出低云 2870m。引擎内部一直用 MSL，只有这里漏了。
+  const observerMsl = p.observerHeightM;
+  const aboveLow = observerMsl > lowBase;
   // 「云底」只在确实存在低云时才作为判据（cloudBaseM 为 0 表示无云可遮）
   const hasLowCloud = p.cloudBaseM > 0;
-  const aboveCloudBase = !hasLowCloud || h > p.cloudBaseM;
+  const aboveCloudBase = !hasLowCloud || observerMsl > p.cloudBaseM;
 
   const clock = localClock(p.timeline.peakMs, p.timezoneOffsetSeconds);
 

@@ -75,12 +75,14 @@ class RateLimitError extends Error {
   }
 }
 
-async function fetchJson<T>(url: string, attempt = 0): Promise<T> {
-  const existing = inflight.get(url);
+async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Promise<T> {
+  // 同一 URL 的内存去重：被取消的调用不能复用别人那条请求，
+  // 否则取消者会连带把正常请求也 abort 掉。
+  const existing = signal ? undefined : inflight.get(url);
   if (existing) return existing as Promise<T>;
 
   const task = (async (): Promise<T> => {
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal });
     if (res.status === 429) {
       const ra = Number(res.headers.get('retry-after')) * 1000;
       throw new RateLimitError(Number.isFinite(ra) && ra > 0 ? ra : 2500 * Math.pow(2, attempt));
@@ -100,7 +102,7 @@ async function fetchJson<T>(url: string, attempt = 0): Promise<T> {
       const wait = err instanceof RateLimitError ? err.retryAfterMs : 800 * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, Math.min(wait, 8000)));
       inflight.delete(url);
-      return fetchJson<T>(url, attempt + 1);
+      return fetchJson<T>(url, attempt + 1, signal);
     }
     throw err;
   } finally {
@@ -174,6 +176,12 @@ export interface ResolvedEvent {
   mode: 'sunrise' | 'sunset';
   /** 参考时间的 UTC 起点（本地日期 00:00） */
   localDayStartUtcMs: number;
+  /**
+   * 该本地日是否真的存在这个事件。
+   * false = 极夜 / 极昼，eventMs 只是兜底值（太阳可能深在地平线下 20°+），
+   * UI 必须明确告知「本日无日落」，而不是给出一个"无烧"的假预报。
+   */
+  exists: boolean;
 }
 
 /**
@@ -206,7 +214,10 @@ export function resolveEvent(point: GeoPoint, dateISO: string, mode: 'sunrise' |
     new Date(ms + offset * 1000).toISOString().slice(0, 10);
 
   const onDay = candidates.find((ms) => localDateOf(ms) === dateISO);
-  // 极昼/极夜兜底：没有符合日期的事件时，取窗口内最接近正午的那个
+  // 极昼/极夜兜底：没有符合日期的事件时，取窗口内最接近正午的那个。
+  // 注意必须把 `exists` 上报出去 —— 否则 UI 会拿一个「太阳在地平线下 23°」的
+  // 时刻当成正常日落，给出一份看起来很正常的"无烧"预报，把极夜误读成坏天气。
+  const exists = onDay !== undefined;
   const eventMs =
     onDay ??
     (candidates.length
@@ -218,7 +229,7 @@ export function resolveEvent(point: GeoPoint, dateISO: string, mode: 'sunrise' |
       : localMidnightUtc + (mode === 'sunrise' ? 6 : 18) * 3600 * 1000);
 
   const sun = sunPosition(eventMs, point.lat, point.lon);
-  return { eventMs, azimuthDeg: sun.azimuth, mode, localDayStartUtcMs: localMidnightUtc };
+  return { eventMs, azimuthDeg: sun.azimuth, mode, localDayStartUtcMs: localMidnightUtc, exists };
 }
 
 /** 在给定时间窗内枚举某模式的所有事件时刻（最多 3 个）。 */
@@ -280,7 +291,19 @@ function series(hourly: OmHourly, varName: string, model: ModelId): Array<number
   return arr as Array<number | null>;
 }
 
-/** 位势高度缺测 → 标准大气标称高度（按地面气压做一次粗修正） */
+/**
+ * 位势高度缺测 → 由地面气压反演 MSL 高度。
+ *
+ * **上一版公式用错了**：`z = 44330·(1 − (p/p0)^0.1903)` 给出的是**离地高度 (AGL)**，
+ * 而调用方要的是 MSL。且 `p0` 被 clamp 到 ≥850，于是拉萨（地面 650hPa）
+ * 的 500hPa 算出 4258m、400hPa 算出 5924m —— 真实 MSL 约 5500 / 7200m，
+ * 凭空下移了一千多米，位势高度一旦缺测就会把黄金层判到错误高度。
+ *
+ * 正确做法：用**标准大气压高公式**从海平面气压出发，
+ *     z = 44330·(1 − (p / 1013.25)^0.1903)
+ * 这本来就是 MSL（标准大气以海平面为基准）。
+ * 现实大气与标准大气有偏差，用地面气压做一次线性修正即可。
+ */
 function levelHeightM(
   hourly: OmHourly,
   model: ModelId,
@@ -290,9 +313,14 @@ function levelHeightM(
 ): number {
   const gph = numOrNull(series(hourly, `geopotential_height_${level.hpa}hPa`, model)[i]);
   if (gph != null && gph > 0) return gph;
-  // 标准大气：z = 44330 * (1 - (p/p0)^0.1903)
-  const p0 = clamp(surfacePressure || 1013.25, 850, 1060);
-  const z = 44330 * (1 - Math.pow(level.hpa / p0, 0.1903));
+
+  // 标准大气：以 1013.25hPa 为海平面基准 → 直接得到 MSL
+  const zStd = 44330 * (1 - Math.pow(level.hpa / 1013.25, 0.1903));
+  // 地面气压偏离标准值时，按等温大气的近似做一次厚度修正
+  // （低压环境整层气柱更厚，同一等压面抬升）
+  const sp = clamp(Number.isFinite(surfacePressure) && surfacePressure > 0 ? surfacePressure : 1013.25, 300, 1100);
+  const corr = 1 + (1013.25 - sp) * 0.00008;
+  const z = zStd * corr;
   return Number.isFinite(z) ? clamp(z, 100, 12000) : level.nominalM;
 }
 
@@ -347,18 +375,24 @@ function buildAerosol(hourly: OmHourly, offsetSeconds: number): AerosolSample[] 
     const timeMs = localIsoToUtcMs(times[i], offsetSeconds);
     if (!Number.isFinite(timeMs)) continue;
     // Air quality API 不要模型后缀
-    const aod = numOrNull((hourly['aerosol_optical_depth'] as Array<number | null>)?.[i]);
+    const aodRaw = numOrNull((hourly['aerosol_optical_depth'] as Array<number | null>)?.[i]);
     out.push({
       timeMs,
-      aod: clamp(aod ?? 0.22, 0.01, 3),
+      // 保留 null 语义：数值上仍需一个可用于插值的占位（0.22 = 气候学中值），
+      // 但 `aodValid` 明确标记它是不是真值。引擎据此把 `available` 判成 false。
+      aod: clamp(aodRaw ?? CLIMATOLOGICAL_AOD, 0.01, 3),
       dust: Math.max(0, num((hourly['dust'] as Array<number | null>)?.[i])),
       pm25: Math.max(0, num((hourly['pm2_5'] as Array<number | null>)?.[i])),
       pm10: Math.max(0, num((hourly['pm10'] as Array<number | null>)?.[i])),
       humidity: clamp(num((hourly['relative_humidity_2m'] as Array<number | null>)?.[i], 55), 0, 100),
+      aodValid: aodRaw != null && aodRaw > 0,
     });
   }
   return out;
 }
+
+/** 气溶胶缺测时的气候学中值（典型城市背景 AOD@550nm） */
+export const CLIMATOLOGICAL_AOD = 0.22;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // URL 构造
@@ -454,8 +488,10 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
   const endDate = pad(dateISO, 1);
 
   const cacheKey = [
-    point.lat.toFixed(3),
-    point.lon.toFixed(3),
+    // 与请求用的光环点保持同一精度（toFixed(4)）。上一版这里用 toFixed(3)，
+    // 约 110m 的粒度，于是相邻 100m 的两个机位会命中同一份缓存。
+    point.lat.toFixed(4),
+    point.lon.toFixed(4),
     dateISO,
     mode,
     models.slice().sort().join('-'),
@@ -469,15 +505,20 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
     return hydrate(cached, ringPoints, grid, models, resolved, true);
   }
 
+  const signal = opts.signal;
   const [fcRaw, aqRaw, elRaw] = await Promise.all([
-    fetchJson<OmPointResponse | OmPointResponse[]>(forecastUrl(ringPoints, models, startDate, endDate)).catch(
+    fetchJson<OmPointResponse | OmPointResponse[]>(forecastUrl(ringPoints, models, startDate, endDate), 0, signal).catch(
       (e) => {
+        if (signal?.aborted) throw e;
         throw new Error(`气象场请求失败：${(e as Error).message}`);
       },
     ),
-    fetchJson<OmPointResponse | OmPointResponse[]>(airUrl(ringPoints, startDate, endDate)).catch(() => null),
-    fetchJson<{ elevation: number[] }>(elevUrl(ringPoints)).catch(() => null),
+    fetchJson<OmPointResponse | OmPointResponse[]>(airUrl(ringPoints, startDate, endDate), 0, signal).catch(() => null),
+    fetchJson<{ elevation: number[] }>(elevUrl(ringPoints), 0, signal).catch(() => null),
   ]);
+
+  // 请求返回后若已被取消，丢弃结果（不写缓存、不覆盖新结果）
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   const fc = asArray(fcRaw);
   const aq = aqRaw ? asArray(aqRaw) : [];

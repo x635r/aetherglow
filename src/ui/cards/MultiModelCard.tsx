@@ -1,4 +1,5 @@
 import { MODEL_META } from '../../data/openMeteo';
+import { VIVIDNESS_CEILING } from '../../engine/constants';
 import type { ModelId, SunsetPredictionOutput } from '../../engine/types';
 import { Dot, InfoTip, Panel } from '../primitives';
 
@@ -39,19 +40,19 @@ export function MultiModelCard({
         <div
           className="absolute inset-y-0 opacity-25"
           style={{
-            left: `${((min - 0.1) / 2.2) * 100}%`,
-            width: `${(Math.max(spread, 0.02) / 2.2) * 100}%`,
+            left: `${((min - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100}%`,
+            width: `${(Math.max(spread, 0.02) / (VIVIDNESS_CEILING - 0.1)) * 100}%`,
             background: `linear-gradient(90deg, ${agreeColor}00, ${agreeColor}, ${agreeColor}00)`,
           }}
         />
         {/* 均值线 */}
         <div
           className="absolute inset-y-0 w-px bg-white/45"
-          style={{ left: `${((mean - 0.1) / 2.2) * 100}%` }}
+          style={{ left: `${((mean - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100}%` }}
         />
         {/* 各模型点 */}
         {peaks.map((m) => {
-          const x = Math.max(2, Math.min(98, ((m.peakVividness - 0.1) / 2.2) * 100));
+          const x = Math.max(2, Math.min(98, ((m.peakVividness - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100));
           const isPrimary = m.model === p.primaryModel;
           return (
             <button
@@ -73,7 +74,7 @@ export function MultiModelCard({
           );
         })}
         <span className="num absolute bottom-0.5 left-1 text-[7.5px] text-slate-500">0</span>
-        <span className="num absolute bottom-0.5 right-1 text-[7.5px] text-slate-500">2.2</span>
+        <span className="num absolute bottom-0.5 right-1 text-[7.5px] text-slate-500">{VIVIDNESS_CEILING.toFixed(1)}</span>
       </div>
 
       {/* 各源明细 */}
@@ -98,7 +99,7 @@ export function MultiModelCard({
                 <div
                   className="h-full rounded-full transition-[width] duration-500"
                   style={{
-                    width: `${Math.min(100, (m.peakVividness / 2.2) * 100)}%`,
+                    width: `${Math.min(100, (m.peakVividness / VIVIDNESS_CEILING) * 100)}%`,
                     background: `${MODEL_META[m.model].color}cc`,
                   }}
                 />

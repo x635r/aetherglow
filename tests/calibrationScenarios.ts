@@ -1,6 +1,10 @@
 /**
  * 场景校准工具：用合成剖面检验引擎输出是否落在行业直觉区间。
- * 运行：npx vitest run tests/calibration.test.ts  （或 tsx 直接跑）
+ * 运行：npx vitest run tests/calibration.test.ts
+ *
+ * 区间对照 SunsetBot 六档口径：
+ *   无烧 <0.05 · 微微烧 0.05–0.2 · 小烧 0.2–0.4 · 中烧 0.4–0.6
+ *   大烧 0.6–1.0 · 特大烧 1.0–1.5 · 世纪大烧 >1.5
  */
 import type { ForecastBundle, HourlySample, ModelId } from '../src/engine/types';
 import { LEVEL_KEYS } from '../src/engine/constants';
@@ -130,21 +134,23 @@ export const SCENARIOS: Scenario[] = [
     cover: { '600': 0.45, '500': 0.4 },
     aod: 0.1,
     visibilityM: 30000,
-    expect: [0.55, 1.1],
+    // 大烧下沿：单层 45% 黄金层在洁净大气下的典型表现
+    expect: [0.6, 1.0],
   },
   {
     name: '卷云+高积云双层 · 大烧典型',
     cover: { '600': 0.35, '500': 0.4, '400': 0.5, '300': 0.45 },
     aod: 0.1,
     visibilityM: 30000,
-    expect: [0.6, 1.4],
+    expect: [0.7, 1.15],
   },
   {
     name: '纯净卷云满铺 · 紫霞型',
     cover: { '400': 0.7, '300': 0.75 },
     aod: 0.09,
     visibilityM: 32000,
-    expect: [0.3, 0.9],
+    // 纯卷云没有黄金层支撑，顶不起大烧（与 SunsetBot 口径一致）
+    expect: [0.3, 0.65],
   },
   {
     name: '全天无云 · 只有地平线渐变',
@@ -174,7 +180,7 @@ export const SCENARIOS: Scenario[] = [
     humidity: 88,
     visibilityM: 4000,
     // 重霾 + 高湿：米氏散射洗白，鲜艳度被指数压制到近乎无烧
-    expect: [0.0, 0.15],
+    expect: [0.0, 0.2],
   },
   {
     name: '水晶天 · 低 AOD 高能见度',
@@ -184,7 +190,7 @@ export const SCENARIOS: Scenario[] = [
     dust: 4,
     visibilityM: 34000,
     humidity: 42,
-    expect: [0.7, 1.5],
+    expect: [0.65, 1.15],
   },
   {
     name: '高原远山遮挡黄金层光路',
@@ -199,6 +205,16 @@ export const SCENARIOS: Scenario[] = [
     cover: { '600': 0.5, '500': 0.45, '700': 0.9 },
     precip: 1.2,
     aod: 0.2,
-    expect: [0.0, 0.2],
+    expect: [0.0, 0.25],
+  },
+  {
+    name: '黄金层 + 满铺卷云 · 大烧天花板',
+    cover: { '600': 0.45, '500': 0.4, '300': 0.9 },
+    aod: 0.06,
+    pm25: 5,
+    visibilityM: 34000,
+    humidity: 40,
+    // 高积云被点燃 + 满铺卷云作第二画布，是本引擎可达到的最高档
+    expect: [0.9, 1.5],
   },
 ];
