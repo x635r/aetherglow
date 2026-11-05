@@ -333,6 +333,27 @@ Open-Meteo 会**接受很多参数名但恒返回 null**。下表全部经过逐
 
 ---
 
+## 调研与文档
+
+- [`docs/RESEARCH-2026-11.md`](docs/RESEARCH-2026-11.md) —— 全网调研：SunsetBot 四章教程
+  全部硬数据、SunsetWx 现状、12 个产品是否真预测颜色、8 个开源项目、
+  ISCCP COT 分箱、Chappuis 峰值截面、数据源逐变量审计
+- [`CHANGELOG-physics.md`](CHANGELOG-physics.md) —— 两轮修复记录（16 项缺陷 + 数据源扩充 + 集合预报）
+- [`labels.example.csv`](labels.example.csv) —— 实测标签模板，配合 `npm run validate`
+
+### 与行业口径的对齐
+
+| 项 | 本引擎 | SunsetBot | 状态 |
+|---|---|---|---|
+| 分档阈值 | 0.03/0.1/0.2/0.4/0.6/0.8/1.0/1.5/2.0 | 同 | ✅ 已对齐 |
+| AOD 分档 | 0.5-0.8 削弱，>0.8 污烧 | 同 | ✅ 已对齐 |
+| 有效地面高度 | `z=H·ln(AOD/(0.02H))` | 同 | ✅ 精确复现教程值 |
+| 微物理 τ_full | 0.9–19.5 | ISCCP 分箱 0–60 | ✅ 独立验证落在箱内 |
+| 云相态 | 层温+RH 动态判别 | 云属经验 | ✅ 更细 |
+| 臭氧 Chappuis | 实测柱量驱动 | 未实现 | ✅ 领先 |
+| 集合概率 | ECMWF 50 成员 | 无 | ✅ 领先 |
+| 云光学厚度 | 气候学近似 | 同（靠卫星云顶亮温） | ⚠️ 共同缺口 |
+
 ## 参考
 
 - Corfidi, S. F., *The Colors of Sunset and Twilight*, NOAA/NWS (2014)
