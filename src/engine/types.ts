@@ -258,6 +258,10 @@ export interface DualHeadEstimate {
     p10: number;
     p50: number;
     p90: number;
+    /** 成员峰值时刻分布（相对事件时刻的分钟偏移） */
+    peakOffsetP10: number;
+    peakOffsetP50: number;
+    peakOffsetP90: number;
   } | null;
 }
 

@@ -133,6 +133,16 @@ export interface EnsembleProbability {
   p90: number;
   /** 数据来源说明 */
   source: 'ecmwf-ensemble' | 'gfs-ensemble';
+  /**
+   * 各成员"最亮时刻"相对事件时刻的分钟偏移分布（p10/p50/p90）。
+   *
+   * 这对摄影决策比"概率"更直接：如果成员们的峰值时刻集中在 −4~+2 分钟，
+   * 说明时间窗很确定；如果分散在 −18~+30，说明云场演化不确定，
+   * 摄影师应该更早到场并多待一会儿。
+   */
+  peakOffsetP10: number;
+  peakOffsetP50: number;
+  peakOffsetP90: number;
 }
 
 interface EnsHourly {
@@ -400,9 +410,11 @@ async function fetchEnsembleProbabilityUncached(
   const toMs = eventMs + TIMELINE_END_MIN * 60000;
 
   const peaks: number[] = [];
+  const peakOffsets: number[] = [];
 
   for (const member of members) {
     let peak = 0;
+    let peakOffset = 0;
     for (let t = fromMs; t <= toMs; t += stepMin * 60000) {
       // 近场三环的加权平均（0km 0.6 / 30km 0.28 / 80km 0.12）
       const ringW = [0.6, 0.28, 0.12];
@@ -447,15 +459,24 @@ async function fetchEnsembleProbabilityUncached(
         precip / wsum,
         altitudeAt(t),
       );
-      if (score > peak) peak = score;
+      if (score > peak) {
+        peak = score;
+        peakOffset = (t - eventMs) / 60000;
+      }
     }
-    if (peak > 0) peaks.push(peak);
+    if (peak > 0) {
+      peaks.push(peak);
+      peakOffsets.push(peakOffset);
+    }
   }
 
   if (peaks.length < 5) return null;
 
   peaks.sort((a, b) => a - b);
   const qtl = (p: number) => peaks[Math.min(peaks.length - 1, Math.floor(p * peaks.length))];
+
+  peakOffsets.sort((a, b) => a - b);
+  const oq = (p: number) => peakOffsets[Math.min(peakOffsets.length - 1, Math.floor(p * peakOffsets.length))];
 
   // "能烧"门槛。
   //
@@ -472,5 +493,8 @@ async function fetchEnsembleProbabilityUncached(
     p50: qtl(0.5),
     p90: qtl(0.9),
     source: 'ecmwf-ensemble',
+    peakOffsetP10: Math.round(oq(0.1)),
+    peakOffsetP50: Math.round(oq(0.5)),
+    peakOffsetP90: Math.round(oq(0.9)),
   };
 }
