@@ -75,6 +75,7 @@ const HOURLY_VARS = [
   'diffuse_radiation',
   'shortwave_radiation',
   'sunshine_duration',
+  'total_column_integrated_water_vapour',
   'temperature_2m',
 ];
 
@@ -380,6 +381,7 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       diffuseRadiation: Math.max(0, num(series(hourly, 'diffuse_radiation', model)[i])),
       shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
       sunshineDurationS: Math.max(0, num(series(hourly, 'sunshine_duration', model)[i])),
+      totalColumnWaterVapour: Math.max(0, numOrNull(series(hourly, 'total_column_integrated_water_vapour', model)[i]) ?? 0),
       cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
       cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
       cloudHigh: clamp(num(series(hourly, 'cloud_cover_high', model)[i]), 0, 100),

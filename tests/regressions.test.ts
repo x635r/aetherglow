@@ -22,6 +22,7 @@ import {
   predictSunset,
   rayMarchingTransmittance,
 } from '../src/engine/SunsetPhysicsEngine';
+import { evaluateSpectral } from '../src/engine/spectral';
 import { LEVEL_KEYS } from '../src/engine/constants';
 import type { LevelKey } from '../src/engine/constants';
 import type { ForecastBundle, HourlySample, ModelId } from '../src/engine/types';
@@ -522,5 +523,29 @@ describe('P1 层湿度剔除假云幕', () => {
     const noRh = cloudScreenQuality(0.5, 'golden', '600');
     const wetRh = cloudScreenQuality(0.5, 'golden', '600', 90);
     expect(noRh).toBeCloseTo(wetRh, 6);
+  });
+});
+
+describe('P1 整层可降水总量对浑浊的影响', () => {
+  it('TCWV 越高，浑浊惩罚越重（同样 AOD/RH）', () => {
+    const dry = evaluateSpectral(0.25, 30, 10, 80, 20, true, 8);
+    const wet = evaluateSpectral(0.25, 30, 10, 80, 20, true, 45);
+    expect(wet.hazePenalty).toBeLessThan(dry.hazePenalty);
+  });
+
+  it('缺测 TCWV 时行为与不传完全一致', () => {
+    const a = evaluateSpectral(0.25, 30, 10, 80, 20, true);
+    const b = evaluateSpectral(0.25, 30, 10, 80, 20, true, undefined);
+    expect(a.saturationGain).toBe(b.saturationGain);
+    expect(a.hazePenalty).toBe(b.hazePenalty);
+  });
+
+  it('TCWV 修正有上下界，不会失控', () => {
+    for (const t of [0, 1, 100, 500]) {
+      const r = evaluateSpectral(0.25, 30, 10, 80, 20, true, t);
+      expect(Number.isFinite(r.hazePenalty)).toBe(true);
+      expect(r.hazePenalty).toBeGreaterThan(0);
+      expect(r.hazePenalty).toBeLessThanOrEqual(1);
+    }
   });
 });

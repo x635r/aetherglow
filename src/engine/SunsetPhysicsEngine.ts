@@ -345,6 +345,8 @@ export interface VerticalProfile {
     directRadiation: number;
     /** 地面散射辐射 W/m² */
     diffuseRadiation: number;
+    /** 整层可降水总量 kg/m² */
+    totalColumnWaterVapour: number;
   };
   cloudBaseM: number | null;
   cloudTopM: number | null;
@@ -389,6 +391,7 @@ export function interpolateHourly(samples: HourlySample[], timeMs: number): Hour
     diffuseRadiation: pick((s) => s.diffuseRadiation ?? 0),
     shortwaveRadiation: pick((s) => s.shortwaveRadiation ?? 0),
     sunshineDurationS: pick((s) => s.sunshineDurationS ?? 0),
+    totalColumnWaterVapour: pick((s) => s.totalColumnWaterVapour ?? 0),
     cloudLow: pick((s) => s.cloudLow),
     cloudMid: pick((s) => s.cloudMid),
     cloudHigh: pick((s) => s.cloudHigh),
@@ -516,6 +519,7 @@ export function parseVerticalCloudProfile(
       freezingLevelM: borrowScalar('freezingLevelM'),
       directRadiation: wpick((s) => s.directRadiation ?? 0),
       diffuseRadiation: wpick((s) => s.diffuseRadiation ?? 0),
+      totalColumnWaterVapour: wpick((s) => s.totalColumnWaterVapour ?? 0),
     },
     cloudBaseM: withCloud.length ? withCloud[0].heightM : null,
     cloudTopM: withCloud.length ? withCloud[withCloud.length - 1].heightM : null,
@@ -972,6 +976,8 @@ export interface SpectralInput {
   visibilityKm: number;
   /** 气溶胶数据是否真实可用；缺省 true（直接调用视为有数据） */
   aerosolAvailable?: boolean;
+  /** 整层可降水总量 kg/m²（可选，驱动吸湿增长的强度） */
+  totalColumnWaterVapour?: number;
 }
 
 export function calculateSpectralExtinction(input: SpectralInput): SpectralReport {
@@ -986,6 +992,7 @@ export function calculateSpectralExtinction(input: SpectralInput): SpectralRepor
     input.humidity,
     vis,
     input.aerosolAvailable ?? true,
+    input.totalColumnWaterVapour,
   );
 }
 
@@ -1284,6 +1291,7 @@ function evaluateSnapshot(
     humidity,
     visibilityKm: visKm,
     aerosolAvailable: aer.aerosolAvailable,
+    totalColumnWaterVapour: profile.local.totalColumnWaterVapour ?? undefined,
   });
 
   // 逐帧否决条件要先算 —— 云海反转会改写低云层的 lit/cover。

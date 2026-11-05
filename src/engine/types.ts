@@ -34,6 +34,14 @@ export interface HourlySample {
   shortwaveRadiation?: number;
   /** 该小时累计日照秒数（3600 = 全晴） */
   sunshineDurationS?: number;
+  /**
+   * 整层可降水总量 kg/m²（= mm）。
+   *
+   * 比地面单点湿度更能代表整条光路的水汽负荷：同样的 AOD，TCWV 高时
+   * 气溶胶吸湿增长更强、米氏散射更重，黄昏会从"橙红"变成"浑白"。
+   * 实测 ECMWF 19.9 / GFS 20.3 kg/m²，ICON 不提供。
+   */
+  totalColumnWaterVapour?: number;
   cloudLow: number;
   cloudMid: number;
   cloudHigh: number;

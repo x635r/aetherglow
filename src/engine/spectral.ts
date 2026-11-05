@@ -65,6 +65,14 @@ export function evaluateSpectral(
   humidity: number,
   visibilityKm: number,
   aerosolAvailable = true,
+  /**
+   * 整层可降水总量 kg/m²（可选）。
+   *
+   * 与地面点湿度的区别：TCWV 是**整条光路**的水汽负荷。同样的 AOD 下，
+   * TCWV 30 kg/m² 时的吸湿增长远强于 8 kg/m² —— 前者黄昏浑白、后者橙红。
+   * 实测 ECMWF 常见 10–40 kg/m²。缺失时退回纯 RH 判据（行为不变）。
+   */
+  totalColumnWaterVapour?: number,
 ): SpectralReport {
   const hasAerosol = aerosolAvailable && Number.isFinite(aod) && aod > 0;
 
@@ -76,7 +84,14 @@ export function evaluateSpectral(
 
   // 吸湿增长：高湿下气溶胶粒径膨胀，米氏消光效率非线性上升
   const hygroscopic = 1 + Math.pow(clamp((RH - 55) / 45, 0, 1), 2) * 1.15;
-  const aodEffective = A * hygroscopic;
+
+  // TCWV 修正：整层水汽负荷越高，吸湿增长越强。
+  // 以 20 kg/m² 为基准（典型中纬度值），±10 对应约 ±18% 的增长系数。
+  const tcwvFactor =
+    totalColumnWaterVapour != null && totalColumnWaterVapour > 0
+      ? clamp(1 + (totalColumnWaterVapour - 20) / 55, 0.8, 1.5)
+      : 1;
+  const aodEffective = A * hygroscopic * tcwvFactor;
 
   // 粗模态（沙尘）比例
   const coarse = clamp(DU / Math.max(PM + DU, 1), 0, 0.9);
