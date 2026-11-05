@@ -73,6 +73,10 @@ export function evaluateSpectral(
    * 实测 ECMWF 常见 10–40 kg/m²。缺失时退回纯 RH 判据（行为不变）。
    */
   totalColumnWaterVapour?: number,
+  /** 臭氧总柱量 (DU)；缺省用标准 300 DU */
+  ozoneColumnDu = 300,
+  /** 该臭氧值是否为实测 */
+  ozoneMeasured = false,
 ): SpectralReport {
   const hasAerosol = aerosolAvailable && Number.isFinite(aod) && aod > 0;
 
@@ -219,6 +223,8 @@ export function evaluateSpectral(
     toneLabel,
     crystal: crystalEligible,
     available: hasAerosol,
+    ozoneDu: ozoneColumnDu,
+    ozoneMeasured,
     detail,
   };
 }

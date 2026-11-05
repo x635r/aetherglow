@@ -614,6 +614,22 @@ export function ozoneExtinctionRel(nm: number): number {
 /** 550nm 垂直臭氧光学厚度（300 DU 标准柱 ≈ 0.021） */
 export const TAU_O3_550 = 0.021;
 
+/** 标准臭氧柱量 (DU) —— TAU_O3_550 的标定基准 */
+export const OZONE_REFERENCE_DU = 300;
+
+/**
+ * 由实际臭氧柱量换算 550nm 垂直光学厚度。
+ *
+ * Chappuis 带吸收与柱量成正比：300 DU → 0.021。
+ * 真实柱量在 220–450 DU 之间（极地春季可达 600）。
+ * 这个 ±30% 的差异直接改变蓝调时刻的色相 —— 臭氧多则尾段更紫蓝，
+ * 臭氧少则更早转向纯红。
+ */
+export function tauO3FromColumn(totalColumnDu: number): number {
+  if (!Number.isFinite(totalColumnDu) || totalColumnDu <= 0) return TAU_O3_550;
+  return TAU_O3_550 * (totalColumnDu / OZONE_REFERENCE_DU);
+}
+
 /**
  * 直射太阳光到达目标云层后的 RGB 透过率（0~1）。
  * 三通道分开积分 → 色相与饱和度是算出来的，不是配出来的。
@@ -624,9 +640,12 @@ export function directSunRgb(
   aod: number,
   angstrom: number,
   rh = 55,
+  /** 实际臭氧总柱量 (DU)；缺省用 300 DU 标准值 */
+  ozoneColumnDu = OZONE_REFERENCE_DU,
 ): { rgb: RgbColor; rayleighAirmass: number; aerosolAirmass: number; rangeKm: number } {
   const { rayleigh, aerosol, rangeKm } = directBeamAirmass(cloudMslM, alphaDeg);
   const hygro = 1 + Math.pow(clamp((rh - 55) / 45, 0, 1), 2) * 1.15;
+  const tauO3Vert = tauO3FromColumn(ozoneColumnDu);
 
   const rgb: RgbColor = { r: 0, g: 0, b: 0 };
   for (const ch of ['r', 'g', 'b'] as const) {
@@ -634,7 +653,7 @@ export function directSunRgb(
     const tauRay = TAU_R550 * Math.pow(lam, -4) * rayleigh;
     const tauAer = aod * hygro * Math.pow(lam, -angstrom) * aerosol;
     // 臭氧：与 Rayleigh 同样沿切点气柱放大；绿/蓝通道在黄昏被显著吃掉
-    const tauO3 = TAU_O3_550 * ozoneExtinctionRel(LAMBDA[ch]) * rayleigh;
+    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * rayleigh;
     rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
   }
   return { rgb, rayleighAirmass: rayleigh, aerosolAirmass: aerosol, rangeKm };

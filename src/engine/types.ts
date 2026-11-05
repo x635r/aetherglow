@@ -191,6 +191,9 @@ export interface SpectralReport {
   crystal: boolean;
   /** 气溶胶数据是否真实可用（false = 接口缺测，此时不做任何色彩加成/惩罚） */
   available: boolean;
+  /** 臭氧总柱量 (DU) 及是否为实测值 */
+  ozoneDu: number;
+  ozoneMeasured: boolean;
   detail: string;
 }
 

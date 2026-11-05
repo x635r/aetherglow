@@ -18,6 +18,7 @@ import {
   effectiveGroundHeightM,
   effectiveGroundHeightRangeM,
   ozoneExtinctionRel,
+  tauO3FromColumn,
   slantAirmass,
   TAU_O3_550,
 } from '../src/engine/optics';
@@ -697,3 +698,53 @@ describe('P1 有效地面高度（气溶胶抬升地面）', () => {
     expect(hazyLow.contribution).toBeLessThan(cleanLow.contribution * 0.6);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// 16. 实测臭氧总柱量驱动 Chappuis 吸收
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 臭氧总柱量影响蓝调时刻', () => {
+  it('300 DU 时垂直光学厚度回到标定值', () => {
+    expect(tauO3FromColumn(300)).toBeCloseTo(TAU_O3_550, 10);
+  });
+
+  it('柱量越高光学厚度越大（线性）', () => {
+    expect(tauO3FromColumn(450)).toBeGreaterThan(tauO3FromColumn(300));
+    expect(tauO3FromColumn(220)).toBeLessThan(tauO3FromColumn(300));
+    expect(tauO3FromColumn(600) / tauO3FromColumn(300)).toBeCloseTo(2, 6);
+  });
+
+  it('缺测时退回标准值', () => {
+    expect(tauO3FromColumn(NaN)).toBe(TAU_O3_550);
+    expect(tauO3FromColumn(0)).toBe(TAU_O3_550);
+    expect(tauO3FromColumn(-100)).toBe(TAU_O3_550);
+  });
+
+  it('臭氧越多，黄昏色相越偏红（Chappuis 吃掉绿蓝）', () => {
+    // α=−1.5° 是可测区间（再低三通道全 underflow）
+    const low = directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 220);
+    const high = directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 450);
+    const hLow = colorChromaViaHue(low.rgb);
+    const hHigh = colorChromaViaHue(high.rgb);
+    // 臭氧多 → 蓝通道被吃更多 → r/b 更小 → 色相更偏黄红
+    expect(hHigh).toBeGreaterThan(hLow);
+  });
+
+  it('臭氧差异对可测色相的影响达到可感知量级（>3°）', () => {
+    const low = colorChromaViaHue(directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 220).rgb);
+    const high = colorChromaViaHue(directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 450).rgb);
+    expect(high - low).toBeGreaterThan(3);
+  });
+});
+
+/** 从 RGB 算色相（度）—— 避免依赖 colorChroma 的返回结构 */
+function colorChromaViaHue(rgb: { r: number; g: number; b: number }): number {
+  const max = Math.max(rgb.r, rgb.g, rgb.b);
+  const min = Math.min(rgb.r, rgb.g, rgb.b);
+  const d = max - min;
+  if (d <= 1e-30) return 0;
+  let h: number;
+  if (max === rgb.r) h = ((rgb.g - rgb.b) / d + 6) % 6;
+  else if (max === rgb.g) h = (rgb.b - rgb.r) / d + 2;
+  else h = (rgb.r - rgb.g) / d + 4;
+  return h * 60;
+}

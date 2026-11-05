@@ -993,6 +993,10 @@ export interface SpectralInput {
   aerosolAvailable?: boolean;
   /** 整层可降水总量 kg/m²（可选，驱动吸湿增长的强度） */
   totalColumnWaterVapour?: number;
+  /** 臭氧总柱量 (DU)；缺省标准 300 */
+  ozoneColumnDu?: number;
+  /** 该臭氧值是否为实测 */
+  ozoneMeasured?: boolean;
 }
 
 export function calculateSpectralExtinction(input: SpectralInput): SpectralReport {
@@ -1008,6 +1012,8 @@ export function calculateSpectralExtinction(input: SpectralInput): SpectralRepor
     vis,
     input.aerosolAvailable ?? true,
     input.totalColumnWaterVapour,
+    input.ozoneColumnDu ?? 300,
+    input.ozoneMeasured ?? false,
   );
 }
 
@@ -1098,6 +1104,11 @@ export interface EngineInput {
   daily: { sunriseMs: number | null; sunsetMs: number | null };
   /** 该日是否真的有日出/日落（极夜/极昼时为 false） */
   eventExists?: boolean;
+  /**
+   * 臭氧总柱量 (DU)，来自 NASA POWER 等实测源。
+   * 缺省时用标准 300 DU —— 但它会显著影响蓝调时刻的色相（±30% 柱量 → hue 差 6°）。
+   */
+  ozoneColumnDu?: number;
   compareModels?: ModelId[];
 }
 
@@ -1306,6 +1317,8 @@ function evaluateSnapshot(
   timeMs: number,
   sunAltitudeDeg: number,
   observerMslM: number,
+  ozoneColumnDu = 300,
+  ozoneMeasured = false,
 ): Snapshot {
   const profile = parseVerticalCloudProfile(bundle, model, timeMs, observerMslM);
   const aer = sampleAerosol(bundle, model, timeMs);
@@ -1324,6 +1337,8 @@ function evaluateSnapshot(
     visibilityKm: visKm,
     aerosolAvailable: aer.aerosolAvailable,
     totalColumnWaterVapour: profile.local.totalColumnWaterVapour ?? undefined,
+    ozoneColumnDu,
+    ozoneMeasured,
   });
 
   // 逐帧否决条件要先算 —— 云海反转会改写低云层的 lit/cover。
@@ -1395,7 +1410,14 @@ function evaluateSnapshot(
 
   const angstrom = angstromFromAod(aer.dust, aer.pm25);
   const goldenH = profile.local.heightM['600'];
-  const beam = directSunRgb(sunAltitudeDeg, goldenH, aer.aod, angstrom, Math.max(aer.humidity, profile.local.humidity));
+  const beam = directSunRgb(
+    sunAltitudeDeg,
+    goldenH,
+    aer.aod,
+    angstrom,
+    Math.max(aer.humidity, profile.local.humidity),
+    ozoneColumnDu,
+  );
   const tanH = beamTangentHeightM(goldenH, sunAltitudeDeg);
   const chroma = colorChroma(beam.rgb);
   // 红/蓝比必须是**连续**量。上一版用 `b > 1e-6 ? r/b : 1` 做硬阈值：
@@ -1708,6 +1730,10 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   // 3650m 高原上的摄影师会被当成在 0m 海平面，云底遮挡判断全错。
   const groundM = Number.isFinite(bundle.localElevationM) ? Math.max(bundle.localElevationM, 0) : 0;
   const observerMslM = groundM + Math.max(observerHeightM, 0);
+  // 臭氧总柱量（实测优先，缺省标准 300 DU）
+  const ozoneDu = Number.isFinite(input.ozoneColumnDu) && (input.ozoneColumnDu as number) > 0
+    ? (input.ozoneColumnDu as number)
+    : 300;
 
   // ── 事件时刻静态诊断 ──
   const eventProfile0 = parseVerticalCloudProfile(bundle, primaryModel, eventMs, observerMslM);
@@ -1774,7 +1800,7 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   for (const s of grid.samples) {
     // cloudSea 现在由 evaluateSnapshot 按当前帧自己判定（逐帧），
     // 不再由调用方用 eventMs 那一刻的剖面固定传入。
-    const snap = evaluateSnapshot(bundle, primaryModel, terrainM, s.timeMs, s.altitudeDeg, observerMslM);
+    const snap = evaluateSnapshot(bundle, primaryModel, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu);
     snapshots.push(snap);
     const g = snap.guards;
     const v = vividnessOf(snap, s.stage, {
@@ -2097,7 +2123,7 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   // 的设计意图正是让用户点击主源来对比 —— 这个功能因此自相矛盾。
   const modelPeaks = compare.map((m) => {
     const vals = grid.samples.map((s) => {
-      const snap = evaluateSnapshot(bundle, m, terrainM, s.timeMs, s.altitudeDeg, observerMslM);
+      const snap = evaluateSnapshot(bundle, m, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu);
       const g = snap.guards;
       return vividnessOf(snap, s.stage, {
         lowLock: g.lowLock,

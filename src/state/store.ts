@@ -7,6 +7,7 @@ import { predictSunset } from '../engine/SunsetPhysicsEngine';
 import type { ModelId, SunMode, SunsetPredictionOutput, GeoPoint, ForecastBundle } from '../engine/types';
 import { loadForecastBundle, resolveEvent, type ResolvedEvent } from '../data/openMeteo';
 import { fetchEnsembleProbability } from '../data/ensemble';
+import { fetchOzoneColumn } from '../data/ozone';
 import { sunPosition } from '../engine/astro';
 import { LEVEL_BY_KEY } from '../engine/constants';
 import type { LevelKey } from '../engine/constants';
@@ -34,6 +35,8 @@ interface Store {
   prediction: SunsetPredictionOutput | null;
   lastLoadedAt: number | null;
   fromCache: boolean;
+  /** 臭氧总柱量 (DU)，来自 NASA POWER；null = 用标准 300 DU */
+  ozoneDu: number | null;
 
   /** Canvas 时间滑块：相对事件的分钟偏移 */
   scrubMin: number;
@@ -85,6 +88,7 @@ export const useStore = create<Store>((set, get) => ({
   prediction: null,
   lastLoadedAt: null,
   fromCache: false,
+  ozoneDu: null,
 
   scrubMin: 0,
   focusLevel: '600',
@@ -107,7 +111,8 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   setPoint: (p, label) => {
-    set((s) => ({ query: { ...s.query, point: p, label } }));
+    // 换地点必须丢弃旧臭氧（不同纬度柱量差可达 100+ DU）
+    set((s) => ({ query: { ...s.query, point: p, label }, ozoneDu: null }));
     void get().load();
   },
 
@@ -180,6 +185,7 @@ export const useStore = create<Store>((set, get) => ({
   recompute: () => {
     const { bundle, query, resolved, tzOffsetSeconds, tzName } = get();
     if (!bundle || !resolved) return;
+
     try {
       const pred = predictSunset({
         point: query.point,
@@ -196,9 +202,28 @@ export const useStore = create<Store>((set, get) => ({
           sunsetMs: query.mode === 'sunset' ? resolved.eventMs : null,
         },
         eventExists: resolved.exists,
+        ozoneColumnDu: get().ozoneDu ?? undefined,
         compareModels: query.models,
       });
       set({ prediction: pred });
+
+      // ── 臭氧总柱量（异步、独立、失败不影响主结果）──
+      //
+      // 滞后 2–3 天对臭氧完全够用（柱量在天气尺度到季节尺度上缓慢变化），
+      // 但它 ±30% 的变化会让黄昏色相偏移 6° —— 值得等这 200ms。
+      const seqO3 = loadSeq;
+      if (get().ozoneDu == null) {
+        void fetchOzoneColumn(query.point, Date.now())
+          .then((o3) => {
+            if (seqO3 !== loadSeq || !o3) return;
+            // 写入 state 后重算一次；ozoneDu 非空后不会再次触发，无循环
+            set({ ozoneDu: o3.totalColumnDu });
+            get().recompute();
+          })
+          .catch(() => {
+            /* 臭氧失败静默：退回标准 300 DU */
+          });
+      }
 
       // ── 集合概率（异步、独立、失败不影响主结果）──
       // 深拷贝一份再替换，避免和后续 recompute 竞争同一个对象。

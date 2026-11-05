@@ -196,6 +196,11 @@ export function AerosolGauge({ p }: { p: SunsetPredictionOutput }) {
         <div className="mt-2 grid w-full grid-cols-2 gap-1.5">
           <PairStat label="PM2.5" value={`${s.pm25.toFixed(0)}`} unit="µg/m³" />
           <PairStat label="湿度" value={`${s.humidity.toFixed(0)}`} unit="%" />
+          <PairStat
+            label="臭氧"
+            value={`${s.ozoneDu.toFixed(0)}`}
+            unit={s.ozoneMeasured ? 'DU' : 'DU (气候值)'}
+          />
         </div>
 
         <p className="mt-2 text-[9.5px] leading-relaxed text-slate-500 break-anywhere">{s.detail}</p>
