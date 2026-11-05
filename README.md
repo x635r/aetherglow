@@ -249,6 +249,31 @@ Open-Meteo 会**接受很多参数名但恒返回 null**。下表全部经过逐
 | `aerosol_optical_depth_XXXnm` | ❌ 400 不支持（只有 550nm） | Ångström 只能由 dust/PM 比例推断 |
 | `ozone` | ⚠️ 是**近地面浓度**（µg/m³），非总柱量 | 不能用于 Chappuis 带 |
 
+### 数据源审计：我们到底能用什么（2026-11 实测）
+
+对 Open-Meteo 做了逐变量探测（60+ 变量 × 3 模型 × 6 环），结论如下。
+**"文档里有" ≠ "返回真数据"** —— 大量参数会被 200 接受但恒返回 null。
+
+| 变量 | ECMWF | GFS | ICON | 结论 |
+|---|---|---|---|---|
+| `cloud_cover_XXXhPa` ×7 | ✅ | ✅ | ✅ | 核心输入 |
+| `geopotential_height_XXXhPa` ×7 | ✅ | ✅ | ✅ | 层高度 |
+| `temperature_XXXhPa` ×7 | ✅ | ✅ | ✅ | 云相态判别 |
+| `relative_humidity_XXXhPa` ×7 | ✅ | ✅ | ✅ | 假云幕剔除 |
+| `direct/diffuse_radiation` | ✅ | ✅ | ✅ | 实测散射比 |
+| `sunshine_duration` | ✅ | ✅ | ✅ | 日照时长 |
+| `total_column_integrated_water_vapour` | ✅ | ✅ | ❌ | 吸湿增长强度 |
+| `freezing_level_height` | ❌ | ✅ | ✅ | 冰/水云辅助 |
+| `boundary_layer_height` | ❌ | ✅ | ❌ | 霾层厚度 |
+| `cloud_base` / `cloud_top` | ❌ | ❌ | ❌ | **空壳：200 但 48/48 null** |
+| `cloud_optical_depth` | ❌ | ❌ | ❌ | 400 不支持 |
+| `aerosol_optical_depth_XXXnm` | — | — | — | 只有 550nm，无分波长 |
+| `relative_humidity_2m`（空气质量） | — | — | — | **72/72 全 null** |
+| `ozone`（空气质量） | — | — | — | 近地面浓度，非总柱量 |
+
+**跨模型补齐**：`boundaryLayerHeight` / `freezingLevelHeight` 在数据层做双向补齐
+（都是大尺度标量，跨模型借用误差远小于"用 0"）。
+
 ### 集合预报：唯一真正统计意义的概率
 
 `/v1/ensemble` 返回 ECMWF 50 个扰动成员。我们让每个成员跑一套轻量评分
