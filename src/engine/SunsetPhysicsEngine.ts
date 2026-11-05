@@ -42,12 +42,15 @@ import {
   AIRMASS_CAP,
   airmassCapForCover,
   beamTangentHeightM,
+  cloudBetaPerKm,
   cloudLitFactor,
+  gapTransmissionBeta,
   cloudPhaseTauFactor,
   colorChroma,
   curvatureDropM,
   directSunRgb,
   earthShadowHeightM,
+  effectiveGroundHeightRangeM,
   groundHitDistanceKm,
   horizonDistanceKm,
   isVisibleFromObserver,
@@ -721,19 +724,26 @@ export function rayMarchingTransmittance(
 
     const thicknessKm = (2 * halfM) / 1000;
 
-    // 目标层自身的消光：光打在云顶，穿一次（不反复穿越）。
-    // 遮挡层则按掠射气团放大，上限随其覆盖率收缩（破碎云走云隙）。
-    const cap = isSelfBand ? 1.0 : airmassCapForCover(coverEff);
-    const X = slabAirmass(thicknessKm, lengthKm, cap);
-
-    // **云块内部**的光学厚度（不含覆盖率）。覆盖率在外层以破碎云形式处理。
-    //
-    // 云相态修正（2026-11 新增）：同样的冰水路径，冰云的光学厚度只有水云的
-    // 1/2~1/3（冰晶有效半径是水滴的 2–3 倍）。用各层温度+RH 动态判别，
-    // 而不是把所有层都当水云。
+    // 云相态修正（2026-11）：同样的冰水路径，冰云的光学厚度只有水云的 1/2~1/3
+    // （冰晶有效半径是水滴的 2–3 倍）。用各层温度+RH 动态判别。
     const repRing = rings[0];
     const phaseFactor = cloudPhaseTauFactor(repRing?.tempC?.[k], repRing?.rh?.[k]);
-    perLevelTau[k] = levelFullOpticalDepth(k) * X * phaseFactor;
+
+    // **概率化云隙透射**（2026-11 替换旧经验上限）
+    //
+    // 旧做法：X = min(path/thickness, 1 + 7·c^1.5)，再乘 τ_full。
+    // 那个 X 上限是拍脑袋的，且 `slabAirmass(thickness, path, cap)` 还要
+    // 额外做 25km 软启动来掩盖「薄层 pathKm 从 0 跳到 200」的几何突变。
+    //
+    // 新做法用有解析依据的 β_eff：
+    //     β_eff = −ln(1 − c(1 − e^(−βL))) / L
+    // τ = β_eff × pathKm，几何突变自然被 c 与 L 吸收，
+    // 不再需要 AIRMASS_CAP，也不再需要软启动。
+    //
+    // 目标层自身只穿一次（光打在云顶），按其厚度带内的实际路径算即可。
+    const betaBlock = cloudBetaPerKm(k) * phaseFactor;
+    const selfScale = isSelfBand ? Math.min(lengthKm, thicknessKm * 2) : lengthKm;
+    perLevelTau[k] = gapTransmissionBeta(coverEff, selfScale, betaBlock) * selfScale;
   }
 
   // 降水：沿光路在最近 150km 的强降水额外叠加（用线性插值而非单环取值）
@@ -744,6 +754,11 @@ export function rayMarchingTransmittance(
     if (p > precipTh) precipTau += (1.1 + Math.min(p, 8) * 0.75) * 0.12;
   }
 
+  // 整条光路的累计光学厚度（各层之和 + 降水）
+  //
+  // 注意：这是「沿线所有被穿过的层」的总和，用于诊断"挡了多少"。
+  // 它不是任何单一透过率的分母 —— 逐层透过率用 `effectiveIllumination`，
+  // 那里已按破碎云形式逐层累乘。
   const totalTau = LEVEL_KEYS.reduce((a, k) => a + perLevelTau[k], 0) + precipTau;
 
   // ── 3. 逐层朝太阳方向的透过率 ──
@@ -1192,6 +1207,8 @@ function evaluateLayer(
   observerHeightM: number,
   cloudSea: { active: boolean; lowCover: number },
   rayCache?: Map<string, RayMarchResult>,
+  /** 550nm AOD —— 用于「气溶胶抬升有效地面」修正 */
+  aod = 0,
 ): {
   best: { ringKm: number; score: number; transmittance: number; cloudAtRing: number; lit: number; visible: number };
   terrainBlocked: boolean;
@@ -1207,7 +1224,22 @@ function evaluateLayer(
     rayCache?.set(cacheKey, ray);
   }
 
-  const lit = cloudLitFactor(heightM, sunAltitudeDeg, role);
+  // ── 气溶胶「抬升地面」修正（2026-11 新增）──
+  //
+  // 高 AOD 时，低层大气本身的消光就足以吃掉日光，等效于把地面抬高。
+  // 云若位于有效地面之下，就照不到直射光 —— 这正是「雾霾天早早不烧」的物理原因。
+  // 旧代码完全没有这一项，因此系统性地高估了霾天的霞光时长。
+  //
+  // 用标高不确定性区间的**下界**（较保守）来抬高有效地面，
+  // 避免因标高未定而过度惩罚。
+  const effGroundM = aod > 0.05 ? effectiveGroundHeightRangeM(aod).min : 0;
+  const heightAboveEffGround = heightM - effGroundM;
+  const litRaw = cloudLitFactor(heightM, sunAltitudeDeg, role);
+  // 云在有效地面之下 → 直射光被低层气溶胶吸收，只剩散射尾
+  const effGroundFactor = effGroundM <= 0
+    ? 1
+    : clamp(1 / (1 + Math.exp(-heightAboveEffGround / 400)), 0.05, 1);
+  const lit = litRaw * effGroundFactor;
   const tauTotal = Number.isFinite(ray.opticalDepth) ? ray.opticalDepth : 1e6;
 
   let best = { ringKm: 0, score: 0, transmittance: 0, cloudAtRing: 0, lit, visible: 0 };
@@ -1321,7 +1353,7 @@ function evaluateSnapshot(
     const nearCover = profile.local.cover[lk];
     const heightM = profile.local.heightM[lk];
 
-    const ev = evaluateLayer(profile, lk, role, sunAltitudeDeg, terrainM, observerMslM, cloudSea, rayCache);
+    const ev = evaluateLayer(profile, lk, role, sunAltitudeDeg, terrainM, observerMslM, cloudSea, rayCache, aer.aod);
 
     // 该层「被点亮且看得见的那部分天空占比」
     const screen = ev.best.score;
@@ -1537,7 +1569,7 @@ function vividnessOf(
   //   · 卷云+高积云双层 · 大烧典型    → 0.94（大烧）
   //   · 黄金层 + 满铺卷云 · 天花板    → 1.10（特大烧）
   //   · 整层阴天 / 低云锁死          → 0.01（无烧）
-  const VIVIDNESS_SCALE = 1.15;
+  const VIVIDNESS_SCALE = 1.12;
   let v = VIVIDNESS_SCALE * sum * stage * spectral.saturationGain * spectral.hazePenalty * purity;
 
   if (guards.lowLock) v *= 0.30;

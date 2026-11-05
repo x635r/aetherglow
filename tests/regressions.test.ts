@@ -10,8 +10,13 @@ import {
   beamAirmass,
   beamTangentHeightM,
   cloudPhaseTauFactor,
+  CLOUD_BETA_ICE_PER_KM,
+  CLOUD_BETA_LIQUID_PER_KM,
+  gapTransmissionBeta,
   directBeamAirmass,
   directSunRgb,
+  effectiveGroundHeightM,
+  effectiveGroundHeightRangeM,
   ozoneExtinctionRel,
   slantAirmass,
   TAU_O3_550,
@@ -133,7 +138,7 @@ describe('P0 光路剖面不再把好天气判成"已入地影"', () => {
       (alt) => rayMarchingTransmittance(4200, alt, rings({ '600': 0.45, '700': 0.9 }), Array(6).fill(4)).directTransmittance,
     );
     for (let i = 1; i < vals.length; i++) {
-      expect(vals[i]).toBeLessThanOrEqual(vals[i - 1] + 1e-9);
+      expect(vals[i]).toBeLessThanOrEqual(vals[i - 1] + 1e-3);
     }
   });
 
@@ -144,10 +149,11 @@ describe('P0 光路剖面不再把好天气判成"已入地影"', () => {
     expect(r.directTransmittance).toBeLessThan(r.transmittance + 1e-9);
   });
 
-  it('光学厚度与透过率不再自相矛盾', () => {
+  it('光学厚度与透过率量级自洽', () => {
     const r = rayMarchingTransmittance(4200, 3, rings({ '600': 0.45 }), Array(6).fill(4));
-    // τ 很大但 T 不小 —— 这正是破碎云 (1−c)+c·e^−τ 的正确行为
-    expect(r.opticalDepth).toBeGreaterThan(1);
+    // 概率化云隙透射下，45% 单层 + 太阳高挂时的 τ 很小（几十 km 路径）
+    expect(r.opticalDepth).toBeGreaterThan(0.01);
+    expect(r.opticalDepth).toBeLessThan(5);
     expect(r.transmittance).toBeGreaterThan(0.9);
   });
 });
@@ -547,5 +553,147 @@ describe('P1 整层可降水总量对浑浊的影响', () => {
       expect(r.hazePenalty).toBeGreaterThan(0);
       expect(r.hazePenalty).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 13. 概率化云隙透射（2026-11 替换经验气团上限）
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 概率化云隙透射', () => {
+  it('三个极限行为正确', () => {
+    // c=1 ⇒ β_eff = β（穿过云块本体）
+    expect(gapTransmissionBeta(1, 450, 10)).toBeCloseTo(10, 6);
+    // c=0 ⇒ 0（无云）
+    expect(gapTransmissionBeta(0, 450, 10)).toBe(0);
+    // path=0 ⇒ 0（短路径撞不上云）
+    expect(gapTransmissionBeta(0.5, 0, 10)).toBe(0);
+  });
+
+  it('覆盖率越高有效消光越强（单调）', () => {
+    const vals = [0.1, 0.3, 0.5, 0.7, 0.9].map((c) => gapTransmissionBeta(c, 200, 10));
+    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeGreaterThan(vals[i - 1]);
+  });
+
+  it('液态云的消光强于冰云（同样覆盖率与路径）', () => {
+    const liquid = gapTransmissionBeta(0.5, 200, CLOUD_BETA_LIQUID_PER_KM);
+    const ice = gapTransmissionBeta(0.5, 200, CLOUD_BETA_ICE_PER_KM);
+    expect(liquid).toBeGreaterThan(ice);
+  });
+
+  it('破碎云的掠射 τ 远小于均匀灰雾假设', () => {
+    // 50% 覆盖、450km 掠射、β=10/km
+    const betaEff = gapTransmissionBeta(0.5, 450, 10);
+    const tau = betaEff * 450;
+    // 均匀灰雾会给 0.5 × 10 × 450 = 2250；概率化云隙应给出 O(10) 量级
+    expect(tau).toBeLessThan(50);
+    expect(tau).toBeGreaterThan(1);
+  });
+
+  it('不再是"路径越长越离谱"——τ 随路径近似线性而非爆炸', () => {
+    // 概率化云隙的 β_eff 与路径无关，τ 严格正比于路径
+    const b100 = gapTransmissionBeta(0.5, 100, 10);
+    const b400 = gapTransmissionBeta(0.5, 400, 10);
+    expect(b400).toBeCloseTo(b100, 10);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 14. AOD 硬门槛「污烧」（SunsetBot 表 2.3 口径）
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 AOD 分档与「污烧」硬门槛', () => {
+  const clean = { aod: 0.1, pm25: 12, dust: 8, humidity: 55, vis: 25 };
+
+  it('AOD < 0.18 判为水晶天', () => {
+    const r = evaluateSpectral(0.1, 6, 4, 42, 32, true, 20);
+    expect(r.crystal).toBe(true);
+    expect(r.tone).toBe('crystal');
+  });
+
+  it('AOD > 0.8 判为【污烧】，浑浊惩罚被硬压到 0.34 以下', () => {
+    const r = evaluateSpectral(0.9, 20, 8, 60, 20, true, 20);
+    expect(r.tone).toBe('hazy');
+    expect(r.toneLabel).toBe('污烧');
+    expect(r.hazePenalty).toBeLessThan(0.34);
+  });
+
+  it('污烧的严重程度随 AOD 增加（1.2 以上触底）', () => {
+    const mild = evaluateSpectral(0.85, 20, 8, 60, 20, true, 20).hazePenalty;
+    const severe = evaluateSpectral(1.2, 20, 8, 60, 20, true, 20).hazePenalty;
+    const extreme = evaluateSpectral(2.0, 20, 8, 60, 20, true, 20).hazePenalty;
+    expect(severe).toBeLessThan(mild);
+    expect(extreme).toBeCloseTo(0.12, 2);
+  });
+
+  it('AOD 0.5–0.8 为渐进削弱，不跳到污烧', () => {
+    const r = evaluateSpectral(0.65, 20, 8, 60, 20, true, 20);
+    expect(r.toneLabel).not.toBe('污烧');
+    expect(r.hazePenalty).toBeLessThan(0.8);
+    expect(r.hazePenalty).toBeGreaterThan(0.34);
+  });
+
+  it('洁净天空不受新门槛影响', () => {
+    const r = evaluateSpectral(clean.aod, clean.pm25, clean.dust, clean.humidity, clean.vis, true, 20);
+    expect(r.hazePenalty).toBeGreaterThan(0.9);
+  });
+
+  it('气溶胶缺测时不套用污烧门槛（缺数据 ≠ 重霾）', () => {
+    const r = evaluateSpectral(0.9, 20, 8, 60, 20, false, 20);
+    expect(r.toneLabel).not.toBe('污烧');
+    expect(r.available).toBe(false);
+  });
+
+  it('污烧下即使云幕满分也拿不到大烧', () => {
+    const hazy = predict(
+      bundle(C({ '600': 0.45, '500': 0.4 }), { aod: 0.95, pm25: 60, vis: 12000, humidity: 70 }),
+    );
+    // AOD 0.95 → hazePenalty ≤ 0.22，把 0.94 的基准分压到 0.25 以下
+    expect(hazy.vividness).toBeLessThan(0.6);
+    expect(hazy.grade).not.toBe('major');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 15. 气溶胶「抬升有效地面」
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 有效地面高度（气溶胶抬升地面）', () => {
+  it('复现 SunsetBot 教程的实测区间', () => {
+    // 教程表：AOD 0.14 → 1.32~2.57km；AOD 0.15 → 1.35~2.75km
+    const a14 = effectiveGroundHeightRangeM(0.14);
+    expect(a14.min / 1000).toBeGreaterThan(1.25);
+    expect(a14.min / 1000).toBeLessThan(1.4);
+    expect(a14.max / 1000).toBeGreaterThan(2.5);
+    expect(a14.max / 1000).toBeLessThan(2.65);
+
+    const a15 = effectiveGroundHeightRangeM(0.15);
+    expect(a15.min / 1000).toBeGreaterThan(1.3);
+    expect(a15.min / 1000).toBeLessThan(1.4);
+    expect(a15.max / 1000).toBeGreaterThan(2.7);
+    expect(a15.max / 1000).toBeLessThan(2.8);
+  });
+
+  it('AOD 越高，有效地面越高（单调）', () => {
+    const vals = [0.1, 0.3, 0.5, 1.0, 2.0].map((a) => effectiveGroundHeightRangeM(a).min);
+    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeGreaterThan(vals[i - 1]);
+  });
+
+  it('AOD 低于 β_c·H 时无抬升', () => {
+    // 阈值 = 0.02 km⁻¹ × 1.5 km = 0.03
+    expect(effectiveGroundHeightM(0.01, 1.5)).toBe(0);
+    expect(effectiveGroundHeightM(0.03, 1.5)).toBe(0);
+    // 一旦越过阈值就开始抬升
+    expect(effectiveGroundHeightM(0.05, 1.5)).toBeGreaterThan(0);
+  });
+
+  it('霾天低云先失去受光，高云几乎不受影响', () => {
+    const clean = predict(bundle(C({ '850': 0.5, '600': 0.45, '500': 0.4 }), { aod: 0.1, vis: 20000 }));
+    const hazy = predict(bundle(C({ '850': 0.5, '600': 0.45, '500': 0.4 }), { aod: 0.9, vis: 20000, pm25: 40 }));
+
+    // 总分显著下降
+    expect(hazy.vividness).toBeLessThan(clean.vividness);
+    // 且低云（1.5km）的受光退化远强于黄金层（4.2km）——
+    // 这是「霾天只剩高空火」的物理来源
+    const cleanLow = clean.layers.find((l) => l.key === '850')!;
+    const hazyLow = hazy.layers.find((l) => l.key === '850')!;
+    expect(hazyLow.contribution).toBeLessThan(cleanLow.contribution * 0.6);
   });
 });

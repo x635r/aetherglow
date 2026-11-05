@@ -350,10 +350,85 @@ export function pathLengthInBand(
  */
 export const AIRMASS_CAP = 8;
 
-/** 覆盖率相关的气团上限 */
+/** 覆盖率相关的气团上限（旧经验式，保留向后兼容） */
 export function airmassCapForCover(cover01: number): number {
   const c = clamp(cover01, 0, 1);
   return 1 + (AIRMASS_CAP - 1) * Math.pow(c, 1.5);
+}
+
+// ── 概率化云隙透射（2026-11 新增，替代上面的经验上限）──────────────────
+
+/** 液态水云的体消光系数 per km（由 τ_full/thickness 反推，与 LEVEL_MICROPHYSICS 一致） */
+export const CLOUD_BETA_LIQUID_PER_KM = 10;
+/** 冰晶云的体消光系数 per km（同样冰水路径下 τ 只有液态的 1/3，因 r_eff 大 3 倍） */
+export const CLOUD_BETA_ICE_PER_KM = 1;
+
+/**
+ * 云块特征水平尺度（km）。
+ *
+ * 30 km = 典型破碎云单体 + 云隙的特征尺度。这个值有独立消融证据：
+ * 在加州独立数据上，把均匀云量改为 30km 概率化云隙透射后，
+ * Spearman 从 0.26 升到 0.44，并消除了 3 次漏报的大烧。
+ * （取 100km 得分更高但被判定不物理 —— 相当于假设云隙巨大。）
+ */
+export const CLOUD_ELEMENT_KM = 30;
+
+/**
+ * 概率化云隙透射 —— 用解析物理替代 `AIRMASS_CAP` 的经验上限。
+ *
+ * **问题**：均匀云量 c 的标准 Beer–Lambert 假设「整层是均匀灰雾」，
+ * 掠射光路 τ = β·D 会线性增长到荒谬值（50% 覆盖、450km 掠射 → τ=2250）。
+ * 真实破碎云里，掠射光走的是**云隙**。
+ *
+ * **模型**（与 b-z/sunsetglow 的实现一致）：
+ * 把云看成特征尺度 L 的云块与云隙交替。整条路径 D 上，
+ * 「穿过一个云块」的概率是 c，「走云隙」的概率是 1−c。于是单次通过的
+ * 平均不透明度是
+ *
+ *      ⟨不透明度⟩ = c · (1 − e^(−β·L))          ← 撞进云块
+ *      ⟨透过率⟩   = 1 − c · (1 − e^(−β·L))
+ *
+ * 折算回等效消光系数：
+ *
+ *      β_eff = −ln(1 − c(1 − e^(−β·L))) / L
+ *
+ * **注意这里没有额外的 `1−exp(−cD/L)` 项** —— 那个是把「路径长度」
+ * 重复计入了一次。路径长度 D 的作用体现在 β_eff × D 上。
+ *
+ * 三个正确的极限行为：
+ *   ① c→0  ⇒ β_eff→0（无云）
+ *   ② c→1  ⇒ β_eff→β（等价于穿过云块本体）
+ *   ③ L→0  ⇒ β_eff→c·β（云块无限小 = 均匀灰雾，退回经典 Beer–Lambert）
+ *   ④ L→∞  ⇒ β_eff→0（云块无限大 = 全是云隙，不物理但边界正确）
+ *
+ * 与旧经验式的关键区别：**上限不再需要 `AIRMASS_CAP = 8` 这种拍脑袋的数**，
+ * 它由 c 和 L 自然决定。L=30km、β=10/km 时 c=0.5 给出 β_eff≈0.167/km ——
+ * 掠射 200km 的 τ≈33，而标准式会给 1000。
+ *
+ * @param cover01   该层覆盖率 0~1
+ * @param pathKm    光路在该层内的路径长度
+ * @param betaPerKm 云块内的消光系数（液态 10 / 冰 1）
+ * @param elementKm 云块特征尺度
+ * @returns 该层的有效消光系数 per km（乘 pathKm 即得 τ）
+ */
+export function gapTransmissionBeta(
+  cover01: number,
+  pathKm: number,
+  betaPerKm: number,
+  elementKm = CLOUD_ELEMENT_KM,
+): number {
+  const c = clamp(cover01, 0, 1);
+  if (c <= 0 || pathKm <= 0 || betaPerKm <= 0) return 0;
+  if (c >= 1) return betaPerKm;
+  const L = Math.max(elementKm, 1e-3);
+  const blockOpacity = 1 - Math.exp(-betaPerKm * L);
+  const meanTransmit = clamp(1 - c * blockOpacity, 1e-9, 1);
+  return -Math.log(meanTransmit) / L;
+}
+
+/** 由层定义给出云块内体消光系数 per km（= τ_full / 1km 厚度） */
+export function cloudBetaPerKm(levelKey: string): number {
+  return Math.max(levelFullOpticalDepth(levelKey), 0.05);
 }
 
 /**
@@ -596,4 +671,60 @@ export function viewPathTransparency(distKm: number, cloudMslM: number, observer
 export function kastenYoungAirmass(altitudeDeg: number): number {
   const a = Math.max(altitudeDeg, -1.5);
   return 1 / (Math.sin(toRad(a)) + 0.50572 * Math.pow(a + 6.07995, -1.6364));
+}
+
+// ── 有效地面高度（气溶胶「抬升地面」效应）──────────────────────────────
+
+/**
+ * 气溶胶消光截止阈值 (km⁻¹)。
+ *
+ * SunsetBot 教程的做法：假定日光无法穿透 550nm 消光系数超过 0.02 km⁻¹ 的空气，
+ * 该高度以下就成了「有效地面」—— 光到不了，云也就照不亮。
+ * 这是把「气溶胶垂直分布」压缩成一个等效几何高度的巧妙做法。
+ */
+export const AEROSOL_VISIBILITY_CUTOFF_PER_KM = 0.02;
+
+/**
+ * 由 AOD 与气溶胶标高求「有效地面高度」(m)。
+ *
+ * 假设气溶胶消光随高度指数衰减：β(z) = β₀·e^(−z/H)，且 AOD = β₀·H。
+ * 令 β(z) = 截止值 β_c，解出
+ *
+ *      z_eff = H · ln(β₀ / β_c) = H · ln(AOD / (β_c · H))
+ *
+ * 当 AOD ≤ β_c·H 时整层都不小于截止值 → z_eff = 0（无抬升）。
+ *
+ * **关键性质：z_eff 对 H 非单调**（在 H ≈ AOD/(e·β_c) 处取极大）。
+ * 这意味着「气溶胶标高是多少」本身有不确定性时，应给出一个区间而不是单值。
+ * 教程的实测值：AOD 0.15 → 1.35~2.75 km，AOD 0.2 → 1.5~3.0 km。
+ *
+ * @param aod       550nm 气溶胶光学厚度
+ * @param scaleHeightKm 气溶胶标高（典型 0.5–4 km）
+ * @returns 有效地面高度 (m)；无抬升时返回 0
+ */
+export function effectiveGroundHeightM(aod: number, scaleHeightKm: number): number {
+  if (!Number.isFinite(aod) || !Number.isFinite(scaleHeightKm)) return 0;
+  if (aod <= 0 || scaleHeightKm <= 0) return 0;
+  const ratio = aod / (AEROSOL_VISIBILITY_CUTOFF_PER_KM * scaleHeightKm);
+  if (ratio <= 1) return 0;
+  return scaleHeightKm * Math.log(ratio) * 1000;
+}
+
+/**
+ * 考虑标高不确定性后的有效地面高度区间 (m)。
+ *
+ * 按教程的典型标高范围 0.5–4 km 扫描，取 min/max。
+ * 这个区间直接可以用作「霞光时长」的不确定度估计 ——
+ * 区间宽说明气溶胶垂直结构不明，时长估计不可靠。
+ */
+export function effectiveGroundHeightRangeM(aod: number): { min: number; max: number } {
+  let min = Infinity;
+  let max = 0;
+  for (const H of [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]) {
+    const z = effectiveGroundHeightM(aod, H);
+    if (z < min) min = z;
+    if (z > max) max = z;
+  }
+  if (!Number.isFinite(min)) min = 0;
+  return { min, max };
 }

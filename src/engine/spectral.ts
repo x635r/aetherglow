@@ -109,6 +109,29 @@ export function evaluateSpectral(
   hazePenalty *= 0.55 + 0.45 * visFactor;
   hazePenalty = clamp(hazePenalty, 0.06, 1);
 
+  // ── AOD 硬门槛：「污烧」上限 ──
+  //
+  // SunsetBot 教程表 2.3 的分档是行业事实标准：
+  //   0–0.1   低于瑞利光学厚度 → 水晶天
+  //   0.1–0.2 极少气溶胶 → 通透
+  //   0.2–0.3 较少 → 较蓝
+  //   0.3–0.5 平均 → 普通通透度
+  //   0.5–0.8 气溶胶偏多 → **明显削弱火烧云**
+  //   >0.8    重度霾/沙尘 → **「污烧」：灰白，再大的云也救不回来**
+  //
+  // 这是一条**硬规则**而不是连续惩罚：>0.8 时无论云幕多好，产物都是
+  // 灰白的"污烧"，鲜艳度必须被压到显著低于「大烧」门槛（0.6）。
+  // 实测表明这一条就能复现 SunsetBot 的大部分技能。
+  if (hasAerosol && A > 0.8) {
+    // 0.8 → 0.34（仍可辨认的弱烧），1.2+ → 0.12（几乎纯灰）
+    const severity = clamp((A - 0.8) / 0.4, 0, 1);
+    hazePenalty = Math.min(hazePenalty, 0.34 - 0.22 * severity);
+  } else if (hasAerosol && A > 0.5) {
+    // 0.5–0.8：明显削弱但未到污烧
+    const t = (A - 0.5) / 0.3;
+    hazePenalty = Math.min(hazePenalty, 1 - 0.5 * t);
+  }
+
   // 气溶胶缺测时：按**气候学中值**给一个轻微的保守惩罚，而不是完全中性。
   //
   // 为什么不能全中性：摄影师拿到的若是"缺测的中性分"，会与"空气尚可"混淆。
@@ -164,6 +187,12 @@ export function evaluateSpectral(
     tone = 'dusty';
     toneLabel = '沙尘浑浊';
     detail = `沙尘柱含量 ${DU.toFixed(0)}µg/m³ 偏高，暖调偏移但对比度下降，建议降低曝光补偿。`;
+  } else if (A > 0.8) {
+    tone = 'hazy';
+    toneLabel = '污烧';
+    detail = `AOD ${A.toFixed(
+      2,
+    )} 已越过 0.8 硬门槛 —— 按行业口径这是「污烧」：米氏散射把直射光整体洗灰，再好的云幕也只能烧出灰白色，不是绯红。`;
   } else if (hazePenalty < 0.62) {
     tone = 'hazy';
     toneLabel = '雾霾浑浊';

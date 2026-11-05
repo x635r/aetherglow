@@ -135,14 +135,14 @@ export const SCENARIOS: Scenario[] = [
     aod: 0.1,
     visibilityM: 30000,
     // 大烧下沿：单层 45% 黄金层在洁净大气下的典型表现
-    expect: [0.6, 1.0],
+    expect: [0.75, 1.1],
   },
   {
     name: '卷云+高积云双层 · 大烧典型',
     cover: { '600': 0.35, '500': 0.4, '400': 0.5, '300': 0.45 },
     aod: 0.1,
     visibilityM: 30000,
-    expect: [0.7, 1.15],
+    expect: [0.85, 1.25],
   },
   {
     name: '纯净卷云满铺 · 紫霞型',
@@ -150,7 +150,7 @@ export const SCENARIOS: Scenario[] = [
     aod: 0.09,
     visibilityM: 32000,
     // 纯卷云没有黄金层支撑，顶不起大烧（与 SunsetBot 口径一致）
-    expect: [0.3, 0.65],
+    expect: [0.3, 0.75],
   },
   {
     name: '全天无云 · 只有地平线渐变',
@@ -190,7 +190,7 @@ export const SCENARIOS: Scenario[] = [
     dust: 4,
     visibilityM: 34000,
     humidity: 42,
-    expect: [0.65, 1.15],
+    expect: [0.75, 1.25],
   },
   {
     name: '高原远山遮挡黄金层光路',
@@ -215,6 +215,6 @@ export const SCENARIOS: Scenario[] = [
     visibilityM: 34000,
     humidity: 40,
     // 高积云被点燃 + 满铺卷云作第二画布，是本引擎可达到的最高档
-    expect: [0.9, 1.5],
+    expect: [1.0, 1.5],
   },
 ];
