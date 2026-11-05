@@ -4,7 +4,9 @@ import type { SunsetPredictionOutput } from '../../engine/types';
 import { localClock } from '../../engine/SunsetPhysicsEngine';
 import { AnimatedNumber, Bar, InfoTip } from '../primitives';
 
-const GRADE_ORDER = ['none', 'faint', 'minor', 'moderate', 'major', 'extreme', 'epic'] as const;
+const GRADE_ORDER = [
+  'none', 'faint', 'minor', 'moderate', 'moderatePlus', 'majorLow', 'major', 'extreme', 'premium', 'epic',
+] as const;
 
 export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
   const theme = p.theme;

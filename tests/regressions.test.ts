@@ -29,7 +29,7 @@ import {
   rayMarchingTransmittance,
 } from '../src/engine/SunsetPhysicsEngine';
 import { evaluateSpectral } from '../src/engine/spectral';
-import { LEVEL_KEYS } from '../src/engine/constants';
+import { GRADES, LEVEL_KEYS } from '../src/engine/constants';
 import type { LevelKey } from '../src/engine/constants';
 import type { ForecastBundle, HourlySample, ModelId } from '../src/engine/types';
 
@@ -748,3 +748,36 @@ function colorChromaViaHue(rgb: { r: number; g: number; b: number }): number {
   else h = (rgb.r - rgb.g) / d + 4;
   return h * 60;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 17. 分档口径对齐 SunsetBot
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 分档对齐行业口径', () => {
+  it('晴空无云与整层阴天必须是低档，不能算"有烧"', () => {
+    const clear = predict(bundle(C({}), { aod: 0.1, vis: 30000 }));
+    const overcast = predict(bundle(C({ '700': 0.95, '600': 0.95, '500': 0.95, '400': 0.95 }), { aod: 0.3 }));
+    expect(['none', 'faint']).toContain(clear.grade);
+    expect(['none', 'faint']).toContain(overcast.grade);
+  });
+
+  it('教科书好天气应落在中高档', () => {
+    const good = predict(bundle(C({ '600': 0.45, '500': 0.4, '400': 0.5, '300': 0.45 }), { aod: 0.1, vis: 30000 }));
+    expect(['major', 'majorLow', 'extreme', 'premium']).toContain(good.grade);
+  });
+
+  it('污烧（AOD>0.8）不得被评为中高档', () => {
+    const dirty = predict(bundle(C({ '600': 0.45, '500': 0.4 }), { aod: 0.95, pm25: 100, humidity: 88, vis: 5000 }));
+    expect(['none', 'faint', 'minor']).toContain(dirty.grade);
+  });
+
+  it('分档 key 唯一（不允许重复 key 破坏主题映射）', () => {
+    const keys = GRADES.map((g) => g.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('分档阈值单调递增', () => {
+    for (let i = 1; i < GRADES.length; i++) {
+      expect(GRADES[i].max).toBeGreaterThan(GRADES[i - 1].max);
+    }
+  });
+});

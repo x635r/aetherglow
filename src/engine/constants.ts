@@ -61,13 +61,37 @@ export const STAGE_KNOTS: Array<[number, number]> = [
 ];
 
 /** 分级阈值 (SunsetBot 行业口径) */
+/**
+ * 分档阈值 —— **对齐 SunsetBot 地图页公布的口径**。
+ *
+ * 早期版本用的是自己编的一套（0.6 就算"大烧"），与行业标准差了近一倍，
+ * 会让用户拿本引擎的分数去和 SunsetBot 对比时严重误读。
+ *
+ * SunsetBot 原始分档（https://www.sunsetbot.top/map/ 实测）：
+ *   0.001–0.05 微烧 | 0.05–0.2 小烧 | 0.2–0.4 小到中 | 0.4–0.6 中烧
+ *   0.6–0.8 中到大 | 0.8–1.0 不完美大烧 | 1.0–1.5 典型大烧
+ *   1.5–2.0 优质 | 2.0–2.5 世纪大烧
+ *
+ * 注意 SunsetBot 的「微烧」从 0.001 起，且**没有独立的"无烧"档** ——
+ * 它的尺度上 0 以下不存在。我们把 <0.001 归为「无烧」以覆盖真正的零贡献场景，
+ * 这是唯一的偏离，已在文档中说明。
+ *
+ * 另外「世纪大烧」(>1.5) 在本引擎当前数据模型下物理不可达
+ * —— 实测上限约 1.15（见 VIVIDNESS_CEILING 注释）。这是诚实的局限。
+ */
 export const GRADES = [
-  { max: 0.05, key: 'none', label: '无烧', en: 'None' },
-  { max: 0.2, key: 'faint', label: '微微烧', en: 'Faint' },
-  { max: 0.4, key: 'minor', label: '小烧', en: 'Minor' },
-  { max: 0.6, key: 'moderate', label: '中烧', en: 'Moderate' },
-  { max: 1.0, key: 'major', label: '大烧', en: 'Major' },
-  { max: 1.5, key: 'extreme', label: '特大烧', en: 'Extreme' },
+  // 低端：SunsetBot 的尺度从 0.001 起就算「微烧」，但那是给"云幕通了但没烧"
+  // 这类有微弱色彩的场景。对我们这种显式建模零贡献（无云 / 阴天锁死）的引擎，
+  // 必须保留"无烧"档，否则「整天乌云」和「晴空无云落霞」会被报成有烧。
+  { max: 0.03, key: 'none', label: '无烧', en: 'None' },
+  { max: 0.10, key: 'faint', label: '微烧', en: 'Faint' },
+  { max: 0.2, key: 'minor', label: '小烧', en: 'Minor' },
+  { max: 0.4, key: 'moderate', label: '小到中烧', en: 'Minor–Moderate' },
+  { max: 0.6, key: 'moderatePlus', label: '中烧', en: 'Moderate' },
+  { max: 0.8, key: 'majorLow', label: '中到大烧', en: 'Moderate–Major' },
+  { max: 1.0, key: 'major', label: '不完美大烧', en: 'Imperfect Major' },
+  { max: 1.5, key: 'extreme', label: '大烧', en: 'Major' },
+  { max: 2.0, key: 'premium', label: '优质大烧', en: 'Premium' },
   { max: Infinity, key: 'epic', label: '世纪大烧', en: 'Epic' },
 ] as const;
 
@@ -91,7 +115,10 @@ export const GRADE_THEME: Record<GradeKey, { from: string; via: string; to: stri
   faint: { from: '#2a2a3d', via: '#3c3550', to: '#584a63', accent: '#b6a7c9', text: '#eadff2' },
   minor: { from: '#3a2a3c', via: '#5c3038', to: '#7a3a34', accent: '#e08a63', text: '#ffe7d6' },
   moderate: { from: '#45251f', via: '#7a2f22', to: '#a8451f', accent: '#ff9a4d', text: '#ffe9d2' },
+  moderatePlus: { from: '#4a221c', via: '#88301f', to: '#b84d1d', accent: '#ffa257', text: '#ffecd6' },
+  majorLow: { from: '#4a1b18', via: '#8c2818', to: '#cc4f1a', accent: '#ffab52', text: '#ffeeda' },
   major: { from: '#4a1b16', via: '#8f2617', to: '#d4571a', accent: '#ffb24d', text: '#fff0d6' },
   extreme: { from: '#4d0f1b', via: '#a4122e', to: '#ff5a3c', accent: '#ff8f5e', text: '#ffeadf' },
+  premium: { from: '#4a0d22', via: '#b81038', to: '#ff4a52', accent: '#ff9d72', text: '#ffeedd' },
   epic: { from: '#3d0a2c', via: '#8f0f42', to: '#ff2f5e', accent: '#ffa3c4', text: '#fff2f7' },
 };

@@ -43,7 +43,7 @@ const GRADE_ALIASES: Record<string, GradeKey> = {
   faint: 'faint', '微烧': 'faint', '微微烧': 'faint', '1': 'faint',
   minor: 'minor', '小烧': 'minor', '2': 'minor',
   moderate: 'moderate', '中烧': 'moderate', '小到中烧': 'moderate', '3': 'moderate',
-  'moderate-to-major': 'major', '中到大烧': 'major',
+  'moderate-to-major': 'majorLow', '中到大烧': 'major',
   major: 'major', '大烧': 'major', '4': 'major',
   extreme: 'extreme', '特大烧': 'extreme', '5': 'extreme',
   epic: 'epic', '世纪大烧': 'epic', '6': 'epic',
@@ -51,7 +51,9 @@ const GRADE_ALIASES: Record<string, GradeKey> = {
 
 /** 六个非平凡档位在有序尺度上的位置（0 = 不烧） */
 const GRADE_INDEX: Record<GradeKey, number> = {
-  none: 0, faint: 1, minor: 2, moderate: 3, major: 4, extreme: 5, epic: 6,
+  none: 0, faint: 1, minor: 2, moderate: 3,
+  moderatePlus: 3, majorLow: 4, major: 4,
+  extreme: 5, premium: 5, epic: 6,
 };
 
 /** 二分类的真实标签：是否达到「小烧」及以上（SunsetBot 口径的"会烧"） */
