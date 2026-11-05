@@ -46,10 +46,68 @@ const ENS_CACHE_PREFIX = 'aetherglow:ens:v1:';
 const ENS_CACHE_TTL_MS = 30 * 60 * 1000;
 const ensInflight = new Map<string, Promise<EnsembleProbability | null>>();
 
-/** 单次集合请求的配额成本（用于文档与自检，不参与逻辑） */
+/** 最近一次观察到的剩余配额（跨请求共享）。用尽后暂停集合请求，保护主预测。 */
+let quotaRemaining = Infinity;
+let quotaResetAt = 0;
+/** 进入冷却的时间戳（429 后） */
+let cooldownUntil = 0;
+
+/**
+ * 是否应该跳过集合请求。
+ *
+ * **这是保护主预测的必要措施**：集合与主预测共用同一份分钟级配额。
+ * 实测一次集合吃 91.8 单位，如果连续查几个城市就会把额度打光，
+ * 而此时主预测的 `/v1/forecast` 也会 429 —— 用户会看到"数据请求失败"，
+ * 却不知道是被一个"附加功能"拖垮的。
+ *
+ * 所以：剩余额度不足 1.5 倍成本、或处于冷却期时，直接跳过集合。
+ */
+function shouldSkipEnsemble(): boolean {
+  const now = Date.now();
+  if (now < cooldownUntil) return true;
+  if (now > quotaResetAt) return false; // 窗口已过，额度应已恢复
+  return quotaRemaining < ENSEMBLE_QUOTA_COST * 1.2;
+}
+
+/**
+ * 单次集合请求的配额成本（实测，**按 变量数 × 环数 × 成员** 累计）
+ *
+ *  · 6 变量 × 3 环 × 50 成员 = **91.8**
+ *  · 1 变量 × 3 环 × 50 成员 = **15.3**
+ *
+ * 即 `cost = 0.102 × 变量数 × 环数 × 成员数`。所以省成本有两条路：
+ * 减少环数、减少变量数（两者都线性）。
+ */
 export const ENSEMBLE_QUOTA_COST = 91.8;
+/** 成本模型系数（实测拟合） */
+export const ENSEMBLE_COST_COEFF = 0.102;
+
+/**
+ * 集合预报的**历史窗口只有约 3 天**。
+ *
+ * 实测：2026-10-20 请求返回 200 但 24/24 全 null；2026-11-02 起才有数据。
+ * 集合 API 是"预报"而非"再分析"，不像 forecast API 能回看两年。
+ * 因此：历史日期（超过 ~3 天前）的集合概率必然为 null，这是预期行为，
+ * 不是错误 —— 上层 UI 不显示集合行即可。
+ */
+export const ENSEMBLE_HISTORY_DAYS = 3;
 /** Open-Meteo 免费额度（单位/分钟） */
 export const ENSEMBLE_QUOTA_PER_MIN = 600;
+
+/**
+ * 配额耗尽的处理契约
+ * ------------------
+ * 实测：成本按 **环数 × 成员数** 计（3 环 × 50 成员 = 91.8），**与变量数无关** ——
+ * 只请求 1 个变量也是 91.8。所以"少要几个变量"省不了钱，只有"少要几个环"
+ * 或"少要几个成员"才行。
+ *
+ * 另外实测：一旦 `x-ratelimit-remaining` 归零，后续请求全部 429，
+ * 且**错误响应不携带 cost 头**。这意味着：
+ *  · 绝不能把集合请求放在主流程的关键路径上（已改为异步追加）
+ *  · 429 时不要重试（额度是分钟级的，立刻重试只会继续吃 429）
+ *  · 缓存 TTL 30 分钟是"经济性"约束，不只是性能优化
+ */
+export const ENSEMBLE_COST_BY_RINGS_MEMBERS = 'cost ≈ rings × members';
 
 /** 集合只需要这几个标量 */
 const ENS_HOURLY = [
@@ -242,6 +300,8 @@ async function fetchEnsembleProbabilityUncached(
   opts: EnsembleOptions,
   signal?: AbortSignal,
 ): Promise<EnsembleProbability | null> {
+  if (shouldSkipEnsemble()) return null;
+
   const { point, eventMs, altitudeAt, tzOffsetSeconds } = opts;
   const stepMin = opts.stepMin ?? 10;
 
@@ -282,7 +342,23 @@ async function fetchEnsembleProbabilityUncached(
   let raw: unknown;
   try {
     const res = await fetch(`${ENSEMBLE_BASE}?${q}`, { headers: { Accept: 'application/json' }, signal });
-    if (!res.ok) return null;
+
+    // 从响应头读取配额状态，供后续请求决策
+    const remain = Number(res.headers.get('x-ratelimit-remaining'));
+    if (Number.isFinite(remain)) quotaRemaining = remain;
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    if (Number.isFinite(reset) && reset > 0) {
+      // reset 是 epoch 秒
+      quotaResetAt = reset > 1e12 ? reset : reset * 1000;
+    }
+    if (!res.ok) {
+      // 429：进入冷却，绝不在分钟内重试（额度是分钟级窗口）
+      if (res.status === 429) {
+        cooldownUntil = Date.now() + 65_000;
+        quotaRemaining = 0;
+      }
+      return null;
+    }
     raw = await res.json();
   } catch {
     return null;
