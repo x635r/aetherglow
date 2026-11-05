@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   beamAirmass,
   beamTangentHeightM,
+  cloudPhaseTauFactor,
   directBeamAirmass,
   directSunRgb,
   ozoneExtinctionRel,
@@ -16,6 +17,7 @@ import {
   TAU_O3_550,
 } from '../src/engine/optics';
 import {
+  cloudScreenQuality,
   parseVerticalCloudProfile,
   predictSunset,
   rayMarchingTransmittance,
@@ -477,5 +479,48 @@ describe('P2 湿度单源一致', () => {
     // 上一版用 aer.humidity（恒 55）反演 → 22km，同时用 93% 算浑浊惩罚
     expect(p.spectral.visibilityKm).toBeLessThan(18);
     expect(p.spectral.humidity).toBeGreaterThan(85);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12. 云相态与层湿度（2026-11 接入的新数据源）
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 云相态温度依赖', () => {
+  it('同样的冰水路径，冰云的光学厚度低于水云', () => {
+    // 300hPa 典型 −35°C（全冰）vs 925hPa 典型 +14°C（全水）
+    const iceF = cloudPhaseTauFactor(-35, 80);
+    const waterF = cloudPhaseTauFactor(14, 90);
+    expect(iceF).toBeLessThan(waterF);
+    expect(iceF).toBeLessThan(0.5);
+    expect(waterF).toBeCloseTo(1, 2);
+  });
+
+  it('相态因子随温度降低单调下降', () => {
+    const vals = [10, 0, -10, -20, -30, -40].map((t) => cloudPhaseTauFactor(t, 80));
+    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeLessThanOrEqual(vals[i - 1] + 1e-9);
+  });
+
+  it('低 RH 的"云"被削弱（干空气不可能是云幕）', () => {
+    const humid = cloudPhaseTauFactor(-20, 95);
+    const dry = cloudPhaseTauFactor(-20, 30);
+    expect(dry).toBeLessThan(humid);
+  });
+
+  it('缺测温度时因子为 1（不引入无根据的修正）', () => {
+    expect(cloudPhaseTauFactor(undefined, 80)).toBe(1);
+  });
+});
+
+describe('P1 层湿度剔除假云幕', () => {
+  it('干层（RH 30%）的云幕质量显著低于湿层（RH 90%）', () => {
+    const dry = cloudScreenQuality(0.5, 'golden', '600', 30);
+    const wet = cloudScreenQuality(0.5, 'golden', '600', 90);
+    expect(dry).toBeLessThan(wet * 0.75);
+  });
+
+  it('无 RH 数据时行为与之前完全一致', () => {
+    const noRh = cloudScreenQuality(0.5, 'golden', '600');
+    const wetRh = cloudScreenQuality(0.5, 'golden', '600', 90);
+    expect(noRh).toBeCloseTo(wetRh, 6);
   });
 });

@@ -158,13 +158,30 @@ const ROLE_COVER_SIGMA: Record<Role, number> = { low: 0.2, mid: 0.26, golden: 0.
  * @param role     层角色
  * @param levelKey 等压面键（用于取该层的云水路径；缺省按中云估计）
  */
-export function cloudScreenQuality(cover01: number, role: Role, levelKey?: LevelKey): number {
+export function cloudScreenQuality(
+  cover01: number,
+  role: Role,
+  levelKey?: LevelKey,
+  /** 该层相对湿度 % —— 用于剔除「模式报有云但空气其实很干」的假云幕 */
+  rh?: number,
+): number {
   const c = clamp(cover01, 0, 1);
   if (c <= 0.02) return 0;
 
   // τ_full = 该云属在 100% 覆盖时的光学厚度（由云水路径 + 有效半径决定）
   const tauFull = levelKey ? levelFullOpticalDepth(levelKey) : 9;
   if (tauFull <= 0) return 0;
+
+  /**
+   * 干空气惩罚。
+   *
+   * 模式的 `cloud_cover_XXXhPa` 本质是"格点云量"，在 RH 很低时它更可能是
+   * 分层/平流的水汽输运而不是真正的云幕（云的物理前提是近饱和）。
+   * 实测（Open-Meteo 层湿度）：300hPa 常见 68–100%，850hPa 96–99%。
+   * 若某层 RH < 40%，把它当成真云幕会虚高"画布"面积。
+   */
+  const dryness =
+    rh == null ? 1 : clamp((rh - 25) / 25, 0.25, 1);
 
   // ① 单体透明度：薄云 = 被点亮的画布；厚云 = 灰幕
   //    低云最吃亏（本来就要挡住地平线），卷云最受益
@@ -178,7 +195,7 @@ export function cloudScreenQuality(cover01: number, role: Role, levelKey?: Level
   // ③ 无云下限：覆盖率极低时确实没什么可烧
   const presence = smoothstep(0.02, 0.12, c);
 
-  return clamp(presence * coveragePreference * (0.15 + 0.85 * elementQuality), 0, 1);
+  return clamp(presence * coveragePreference * (0.15 + 0.85 * elementQuality) * dryness, 0, 1);
 }
 
 /** 沿等压面按高度插值云量（用于绘图/兼容，不做物理消光用） */
@@ -1209,7 +1226,7 @@ function evaluateLayer(
       visibleFactor = 1;
     }
 
-    const quality = cloudScreenQuality(cover, role, levelKey);
+    const quality = cloudScreenQuality(cover, role, levelKey, ring.rh?.[levelKey]);
     if (quality <= 0) continue;
 
     // 近远权重：最近环满权，最远环 0.34 —— 不再有 0.55 的保底
@@ -1310,7 +1327,7 @@ function evaluateSnapshot(
       role,
       cover: repCover,
       heightM,
-      quality: cloudScreenQuality(repCover, role, lk),
+      quality: cloudScreenQuality(repCover, role, lk, profile.rings[0]?.rh?.[lk]),
       lit: ev.best.lit,
       transmittance: ev.best.transmittance,
       visible: ev.best.visible,
