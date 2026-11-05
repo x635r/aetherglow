@@ -84,8 +84,12 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
             <div className="mt-2.5 w-[190px] sm:w-[250px]">
               <Bar value={vividPct} max={1} color={theme.accent} height={7} glow />
               <div className="mt-1.5 flex justify-between text-[9px] text-white/40">
-                {['无', '微', '中', '大', '世纪'].map((t, i) => (
-                  <span key={t} className={i === 0 || i === 4 ? '' : 'hidden sm:inline'}>
+                {/* 图例标注 4 个关键刻度。分档阈值是非线性的
+                    （0.03/0.1/0.2/0.4/0.6/0.8/1.0/1.5/2.0），
+                    所以用 justify-between 只给出"无→小→中→大"的粗略方向，
+                    精确分级以右侧「等级」徽章为准。 */}
+                {['无烧', '小烧', '中烧', '大烧'].map((t) => (
+                  <span key={t} className="whitespace-nowrap">
                     {t}
                   </span>
                 ))}
