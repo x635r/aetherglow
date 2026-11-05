@@ -35,16 +35,27 @@ const FORECAST_BASE = 'https://api.open-meteo.com/v1/forecast';
 const AIR_BASE = 'https://air-quality-api.open-meteo.com/v1/air-quality';
 const ELEV_BASE = 'https://api.open-meteo.com/v1/elevation';
 
+/**
+ * 请求变量清单。
+ *
+ * 每一项都经过实测确认「真的返回数据」——Open-Meteo 会接受很多参数名但恒返回 null
+ * （例如 `cloud_base` / `cloud_top` / `cloud_optical_depth` 全部是空壳，
+ *  虽然 200 通过但 48/48 全是 null）。下面这些是逐个验证过非空率的。
+ *
+ * 关键增益（2026-11 补充）：
+ *  · `relative_humidity_XXXhPa` —— **气压层湿度**，用于云相态判别。
+ *    实测 925hPa 97%、700hPa 83%、300hPa 80%，是真实数据。
+ *    「冰云是画布、水云是灰幕」这条领域共识终于有了数据支撑。
+ *  · `direct_radiation` / `diffuse_radiation` —— 地面辐射分量，
+ *    用来替代此前纯经验公式的 `diffuseWeight`。
+ *  · `freezing_level_height` / `boundary_layer_height` —— 零度层与边界层高度。
+ *  · `temperature_XXXhPa` —— 原本就请求了但被 `interpolateHourly` 丢弃，现已接回。
+ */
 const HOURLY_VARS = [
   ...PRESSURE_LEVELS.map((l) => `cloud_cover_${l.hpa}hPa`),
   ...PRESSURE_LEVELS.map((l) => `geopotential_height_${l.hpa}hPa`),
-  'temperature_925hPa',
-  'temperature_850hPa',
-  'temperature_700hPa',
-  'temperature_600hPa',
-  'temperature_500hPa',
-  'temperature_400hPa',
-  'temperature_300hPa',
+  ...PRESSURE_LEVELS.map((l) => `temperature_${l.hpa}hPa`),
+  ...PRESSURE_LEVELS.map((l) => `relative_humidity_${l.hpa}hPa`),
   'cloud_cover_low',
   'cloud_cover_mid',
   'cloud_cover_high',
@@ -57,6 +68,14 @@ const HOURLY_VARS = [
   'wind_direction_10m',
   'dew_point_2m',
   'surface_pressure',
+  // ── 2026-11 新增（均已实测非空）──
+  'boundary_layer_height',
+  'freezing_level_height',
+  'direct_radiation',
+  'diffuse_radiation',
+  'shortwave_radiation',
+  'sunshine_duration',
+  'temperature_2m',
 ];
 
 const AIR_VARS = ['aerosol_optical_depth', 'dust', 'pm2_5', 'pm10', 'relative_humidity_2m'];
@@ -335,11 +354,14 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
     const cloud = {} as Record<LevelKey, number>;
     const levelHeight = {} as Record<LevelKey, number>;
     const levelTemp: Partial<Record<LevelKey, number>> = {};
+    const levelHumidity: Partial<Record<LevelKey, number>> = {};
     for (const lv of PRESSURE_LEVELS) {
       cloud[lv.key] = clamp(num(series(hourly, `cloud_cover_${lv.hpa}hPa`, model)[i]), 0, 100);
       levelHeight[lv.key] = levelHeightM(hourly, model, lv, i, sp);
       const t = numOrNull(series(hourly, `temperature_${lv.hpa}hPa`, model)[i]);
       if (t != null) levelTemp[lv.key] = t;
+      const rh = numOrNull(series(hourly, `relative_humidity_${lv.hpa}hPa`, model)[i]);
+      if (rh != null) levelHumidity[lv.key] = clamp(rh, 0, 100);
     }
 
     const visRaw = numOrNull(series(hourly, 'visibility', model)[i]);
@@ -351,6 +373,13 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       cloud,
       levelHeightM: levelHeight,
       levelTempC: levelTemp,
+      levelHumidity,
+      boundaryLayerM: Math.max(0, numOrNull(series(hourly, 'boundary_layer_height', model)[i]) ?? 0),
+      freezingLevelM: Math.max(0, numOrNull(series(hourly, 'freezing_level_height', model)[i]) ?? 0),
+      directRadiation: Math.max(0, num(series(hourly, 'direct_radiation', model)[i])),
+      diffuseRadiation: Math.max(0, num(series(hourly, 'diffuse_radiation', model)[i])),
+      shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
+      sunshineDurationS: Math.max(0, num(series(hourly, 'sunshine_duration', model)[i])),
       cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
       cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
       cloudHigh: clamp(num(series(hourly, 'cloud_cover_high', model)[i]), 0, 100),
@@ -612,6 +641,50 @@ interface CachedBundle {
   apiCalls: number;
 }
 
+/**
+ * 用其他模型的非空值补齐本模型缺失的大尺度标量。
+ *
+ * 只补 `boundaryLayerM` / `freezingLevelM` 两个字段：
+ *  · 都是单值标量，跨模型借用误差远小于"直接用 0"
+ *  · 逐样本、逐环匹配（按时间戳找最近样本），不做外推
+ */
+function backfillModelScalars(datasets: Record<ModelId, ModelDataset>, models: ModelId[]): void {
+  const fields = ['boundaryLayerM', 'freezingLevelM'] as const;
+  for (const m of models) {
+    const ds = datasets[m];
+    if (!ds?.rings.length) continue;
+    const donors = models
+      .filter((x) => x !== m)
+      .map((x) => datasets[x])
+      .filter((d) => d?.rings?.length);
+
+    for (const field of fields) {
+      const hasAny = ds.rings.some((r) => r.samples.some((s) => (s[field] ?? 0) > 0));
+      if (hasAny) continue;
+      for (const ring of ds.rings) {
+        const donorRing = donors
+          .map((d) => d.rings.find((r) => r.ringKm === ring.ringKm))
+          .find((r) => r && r.samples.some((s) => (s[field] ?? 0) > 0));
+        if (!donorRing) continue;
+        for (const sample of ring.samples) {
+          // 找时间最近的多方样本
+          let best: HourlySample | null = null;
+          let bestDt = Infinity;
+          for (const ds2 of donorRing.samples) {
+            const dt = Math.abs(ds2.timeMs - sample.timeMs);
+            if (dt < bestDt) {
+              bestDt = dt;
+              best = ds2;
+            }
+          }
+          const v = best?.[field] ?? 0;
+          if (v > 0 && bestDt <= 45 * 60000) sample[field] = v;
+        }
+      }
+    }
+  }
+}
+
 function hydrate(
   payload: CachedBundle,
   ringPoints: GeoPoint[],
@@ -655,6 +728,16 @@ function hydrate(
       };
     }
   }
+
+  // ── 跨模型补齐大尺度标量 ──
+  //
+  // 实测：`boundary_layer_height` 只有 GFS 提供（ECMWF/ICON 全 null），
+  // `freezing_level_height` ECMWF 不提供。这两个量对「霾层厚度」「冰/水云分界」
+  // 都是必要输入，缺失时相关物理判据会静默失效。
+  //
+  // 它们都是**大尺度标量**（不像云量那样有强局地性），跨模型借用可接受。
+  // 在数据层做（而不是引擎层），这样 UI、诊断、导出都能拿到补齐后的值。
+  backfillModelScalars(modelDatasets, models);
 
   const bundle: ForecastBundle = {
     models: modelDatasets,

@@ -43,6 +43,7 @@ import {
   airmassCapForCover,
   beamTangentHeightM,
   cloudLitFactor,
+  cloudPhaseTauFactor,
   colorChroma,
   curvatureDropM,
   directSunRgb,
@@ -297,6 +298,10 @@ export interface ProfileRing {
   sample: HourlySample;
   cover: Record<LevelKey, number>;
   heightM: Record<LevelKey, number>;
+  /** 各层温度 °C（驱动云相态判别） */
+  tempC: Partial<Record<LevelKey, number>>;
+  /** 各层相对湿度 %（冰云需要近饱和） */
+  rh: Partial<Record<LevelKey, number>>;
   /** 该环对观测者的视线是否被地平线切断（云太低太远） */
   visible: Record<LevelKey, boolean>;
 }
@@ -315,6 +320,14 @@ export interface VerticalProfile {
     cloudLow: number;
     cloudMid: number;
     cloudHigh: number;
+    /** 边界层高度 m（霾层厚度） */
+    boundaryLayerM: number;
+    /** 零度层高度 m */
+    freezingLevelM: number;
+    /** 地面直射辐射 W/m² */
+    directRadiation: number;
+    /** 地面散射辐射 W/m² */
+    diffuseRadiation: number;
   };
   cloudBaseM: number | null;
   cloudTopM: number | null;
@@ -330,15 +343,35 @@ export function interpolateHourly(samples: HourlySample[], timeMs: number): Hour
 
   const cloud = {} as Record<LevelKey, number>;
   const levelHeightM = {} as Record<LevelKey, number>;
+  const levelTempC: Partial<Record<LevelKey, number>> = {};
+  const levelHumidity: Partial<Record<LevelKey, number>> = {};
   for (const k of LEVEL_KEYS) {
     cloud[k] = pick((s) => s.cloud[k]);
     levelHeightM[k] = pick((s) => s.levelHeightM[k]);
+    // **上一版在这里直接写 `levelTempC: {}`**，把数据层辛苦请求来的层温度全部丢弃，
+    // 于是「冰云 vs 水云」这条领域内最一致的光学厚度判据完全没有被用上。
+    // 现在按层插值，缺测的层保持 undefined（而不是填 0 —— 0°C 是个有物理含义的值）。
+    const ts = samples.map((s) => s.levelTempC[k]).filter((v): v is number => typeof v === 'number');
+    if (ts.length >= 1) {
+      levelTempC[k] = pick((s) => s.levelTempC[k] ?? ts[0]);
+    }
+    const rhs = samples.map((s) => s.levelHumidity?.[k]).filter((v): v is number => typeof v === 'number');
+    if (rhs.length >= 1) {
+      levelHumidity[k] = pick((s) => s.levelHumidity?.[k] ?? rhs[0]);
+    }
   }
   return {
     timeMs,
     cloud,
     levelHeightM,
-    levelTempC: {},
+    levelTempC,
+    levelHumidity,
+    boundaryLayerM: pick((s) => s.boundaryLayerM ?? 0),
+    freezingLevelM: pick((s) => s.freezingLevelM ?? 0),
+    directRadiation: pick((s) => s.directRadiation ?? 0),
+    diffuseRadiation: pick((s) => s.diffuseRadiation ?? 0),
+    shortwaveRadiation: pick((s) => s.shortwaveRadiation ?? 0),
+    sunshineDurationS: pick((s) => s.sunshineDurationS ?? 0),
     cloudLow: pick((s) => s.cloudLow),
     cloudMid: pick((s) => s.cloudMid),
     cloudHigh: pick((s) => s.cloudHigh),
@@ -373,12 +406,18 @@ export function parseVerticalCloudProfile(
     const cover = {} as Record<LevelKey, number>;
     const heightM = {} as Record<LevelKey, number>;
     const visible = {} as Record<LevelKey, boolean>;
+    const tempC: Partial<Record<LevelKey, number>> = {};
+    const rh: Partial<Record<LevelKey, number>> = {};
     for (const k of LEVEL_KEYS) {
       cover[k] = clamp(s.cloud[k] / 100, 0, 1);
       heightM[k] = s.levelHeightM[k];
       visible[k] = isVisibleFromObserver(heightM[k], observerHeightM, r.ringKm);
+      const t = s.levelTempC?.[k];
+      if (typeof t === 'number') tempC[k] = t;
+      const h = s.levelHumidity?.[k];
+      if (typeof h === 'number') rh[k] = h;
     }
-    return { ringKm: r.ringKm, point: r.point, sample: s, cover, heightM, visible };
+    return { ringKm: r.ringKm, point: r.point, sample: s, cover, heightM, tempC, rh, visible };
   });
 
   const near = rings.filter((r) => r.ringKm <= 30);
@@ -394,6 +433,34 @@ export function parseVerticalCloudProfile(
 
   const wpick = (fn: (s: HourlySample) => number): number =>
     near.reduce((acc, r, i) => acc + fn(r.sample) * weights[i], 0) / wSum;
+
+  /**
+   * 跨模型补齐标量字段。
+   *
+   * **实测发现**：`boundary_layer_height` 只有 GFS 提供（ECMWF/ICON 全 null），
+   * 而 `freezing_level_height` ECMWF 不提供。如果只用主源，这两个物理量在
+   * 主源为 ECMWF 时会永久缺失，接了等于没接。
+   * 它们都是**大尺度标量**（不像云量那样有强局地性），跨模型借用是可接受的。
+   */
+  const borrowScalar = (field: 'boundaryLayerM' | 'freezingLevelM'): number => {
+    const own = wpick((s) => s[field] ?? 0);
+    if (own > 0) return own;
+    for (const m of Object.keys(bundle.models) as ModelId[]) {
+      if (m === model) continue;
+      const ds2 = bundle.models[m];
+      if (!ds2?.rings.length) continue;
+      const near2 = ds2.rings.filter((r) => r.ringKm <= 30);
+      const list2 = near2.length ? near2 : ds2.rings;
+      const w2 = list2.map((r) => (r.ringKm === 0 ? 0.66 : 0.34));
+      const sum2 = w2.reduce((a, b) => a + b, 0) || 1;
+      const v = list2.reduce((acc, r, i) => {
+        const smp = interpolateHourly(r.samples, timeMs);
+        return acc + (smp[field] ?? 0) * w2[i];
+      }, 0) / sum2;
+      if (v > 0) return v;
+    }
+    return 0;
+  };
 
   // 云底/云顶：必须按**高度**排序，不能按 hPa 排序后再取首尾。
   // 门槛取 20%（而不是 50%）：只要有两成覆盖，那就是被摄影师看见的云底。
@@ -428,6 +495,10 @@ export function parseVerticalCloudProfile(
       cloudLow: wpick((s) => s.cloudLow),
       cloudMid: wpick((s) => s.cloudMid),
       cloudHigh: wpick((s) => s.cloudHigh),
+      boundaryLayerM: borrowScalar('boundaryLayerM'),
+      freezingLevelM: borrowScalar('freezingLevelM'),
+      directRadiation: wpick((s) => s.directRadiation ?? 0),
+      diffuseRadiation: wpick((s) => s.diffuseRadiation ?? 0),
     },
     cloudBaseM: withCloud.length ? withCloud[0].heightM : null,
     cloudTopM: withCloud.length ? withCloud[withCloud.length - 1].heightM : null,
@@ -531,6 +602,9 @@ export function rayMarchingTransmittance(
   options: RayMarchOptions = {},
 ): RayMarchResult {
   const precipTh = options.precipThreshold ?? 0.5;
+  // 实测辐射分量（ground-level，来自 Open-Meteo 的 direct_radiation / diffuse_radiation）
+  const directRadiationW = rings[0]?.sample?.directRadiation ?? 0;
+  const diffuseRadiationW = rings[0]?.sample?.diffuseRadiation ?? 0;
   const maxRange = options.maxRangeKm ?? 450;
   const includeSelf = options.includeSelfExtinction ?? true;
 
@@ -632,7 +706,13 @@ export function rayMarchingTransmittance(
     const X = slabAirmass(thicknessKm, lengthKm, cap);
 
     // **云块内部**的光学厚度（不含覆盖率）。覆盖率在外层以破碎云形式处理。
-    perLevelTau[k] = levelFullOpticalDepth(k) * X;
+    //
+    // 云相态修正（2026-11 新增）：同样的冰水路径，冰云的光学厚度只有水云的
+    // 1/2~1/3（冰晶有效半径是水滴的 2–3 倍）。用各层温度+RH 动态判别，
+    // 而不是把所有层都当水云。
+    const repRing = rings[0];
+    const phaseFactor = cloudPhaseTauFactor(repRing?.tempC?.[k], repRing?.rh?.[k]);
+    perLevelTau[k] = levelFullOpticalDepth(k) * X * phaseFactor;
   }
 
   // 降水：沿光路在最近 150km 的强降水额外叠加（用线性插值而非单环取值）
@@ -690,10 +770,31 @@ export function rayMarchingTransmittance(
    * w_diffuse 在太阳接近地平线时趋近 1（几乎全是散射光），
    * 在高空太阳时趋近 0（直射为主）。
    */
+  //
+  // 散射／直射配比。
+  //
+  // 旧实现是纯经验式：太阳越低散射占比越高（0.12 → 0.95）。
+  // 现在优先用**实测辐射分量** `direct_radiation / (direct + diffuse)`：
+  // 这是地表实测的 DNI/漫射比，比任何 α 的经验函数都直接。
+  // 只有数据缺失（旧缓存或模型不提供）时才退回经验式。
+  //
+  // 注意辐射量是**地面**值，而我们要的是"云层高度的散射占比"。
+  // 地面 DNI 在低太阳角时会被地形和前向散射削弱，所以用实测值做
+  // 相对校正（比率），再用 α 做基线 —— 两者相乘而不是直接替换。
+  const measuredDiffuseRatio = (() => {
+    const sum = directRadiationW + diffuseRadiationW;
+    if (!(sum > 5)) return null;
+    return clamp(diffuseRadiationW / sum, 0, 1);
+  })();
+
   const diffuseWeight = (alphaDeg: number): number => {
-    // α ≥ 8°：以直射为主（w=0.12）；α ≤ -4°：几乎全为散射（w=0.95）
+    // 经验基线：α ≥ 8° 以直射为主（0.12）；α ≤ −4° 几乎全是散射（0.95）
     const t = clamp((8 - alphaDeg) / 12, 0, 1);
-    return 0.12 + 0.83 * smoothstep(0, 1, t);
+    const baseline = 0.12 + 0.83 * smoothstep(0, 1, t);
+    if (measuredDiffuseRatio == null) return baseline;
+    // 实测漫射占比在黄昏通常 0.7~0.95。把它作为上限，与基线取较大者，
+    // 这样"实测显示此刻以漫射为主"不会再被经验式压回直射主导。
+    return clamp(Math.max(baseline, measuredDiffuseRatio * 0.95), 0.05, 0.97);
   };
 
   /** 纯直射份额（不含散射项）—— 物理上随太阳下沉单调递减 */
@@ -781,7 +882,8 @@ export function rayMarchingTransmittance(
       const selfBand = lo <= targetHeightM && targetHeightM <= hi;
       const cap = selfBand ? 1.0 : airmassCapForCover(c);
       const X = slabAirmass(thicknessKm, lengthKm, cap);
-      const tauBlock = levelFullOpticalDepth(k) * X;
+      const phaseFactor = cloudPhaseTauFactor(ring.tempC?.[k], ring.rh?.[k]);
+      const tauBlock = levelFullOpticalDepth(k) * X * phaseFactor;
       tauToHere += tauBlock * c;
       tToHere *= 1 - c + c * Math.exp(-tauBlock);
     }
@@ -1291,6 +1393,10 @@ export interface FrameGuards {
   cloudBaseM: number | null;
   visM: number;
   observerMslM: number;
+  /** 边界层高度 m（霾层厚度） */
+  boundaryLayerM: number;
+  /** 观测者是否在边界层之上 —— 决定霾惩罚是否减轻 */
+  aboveBoundaryLayer: boolean;
 }
 
 function frameGuardsOf(
@@ -1305,6 +1411,7 @@ function frameGuardsOf(
   const cloudBase = profile.cloudBaseM;
   const belowBase = cloudBase === null || observerMslM < cloudBase;
   const visM = profile.local.visibilityM;
+  const boundaryLayerM = profile.local.boundaryLayerM ?? 0;
 
   const lowDeck = Math.max(profile.local.cover['925'], profile.local.cover['850']);
 
@@ -1316,9 +1423,18 @@ function frameGuardsOf(
     belowBase &&
     (lowDeck > 0.8 || (profile.local.cover['925'] > 0.75 && profile.local.cover['850'] > 0.55));
 
-  // 雾/霾单独一档：能见度太差导致近地层米氏消光吞掉地平线余晖
-  const effVisM = visM > 0 ? visM : visibilityFromAod(profile.local.humidity > 0 ? 0.22 : 0.22, profile.local.humidity) * 1000;
-  const hazeLock = !cloudSeaActive && !lowLock && effVisM > 0 && effVisM < 3000;
+  // 雾/霾单独一档：能见度太差导致近地层米氏消光吞掉地平线余晖。
+  //
+  // **用边界层高度区分「浅霾」与「深霾」**（2026-11 新增）：
+  // 气溶胶基本都被约束在边界层内。边界层 400m 时，霾层只在脚下 400m，
+  // 抬到 900m 的机位就完全越过了 —— 那种情况不该按"地平线被吞没"处理。
+  // 反过来边界层 3km 的深霾，再怎么抬机位也没用。
+  // 这直接对应 SunsetBot 教程里的「垂直逃逸」表：气溶胶标高 0.5km 时
+  // 抬升 500m 可减少 63% 的气柱，标高 4km 时只减少 12%。
+  const effVisM = visM > 0 ? visM : visibilityFromAod(0.22, profile.local.humidity) * 1000;
+  // 观测者是否在边界层之上（+150m 余量），是则应显著减轻霾惩罚
+  const aboveBoundaryLayer = boundaryLayerM > 0 && observerMslM > boundaryLayerM + 150;
+  const hazeLock = !cloudSeaActive && !lowLock && effVisM > 0 && effVisM < 3000 && !aboveBoundaryLayer;
   const fogLock = !cloudSeaActive && !lowLock && !hazeLock && visM > 0 && visM < 3000 && profile.local.humidity > 90;
 
   const overcastLock =
@@ -1347,6 +1463,8 @@ function frameGuardsOf(
     cloudBaseM: cloudBase,
     visM,
     observerMslM,
+    boundaryLayerM,
+    aboveBoundaryLayer,
   };
 }
 

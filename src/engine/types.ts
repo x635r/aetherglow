@@ -17,6 +17,23 @@ export interface HourlySample {
   levelHeightM: Record<LevelKey, number>;
   /** 各等压面温度 °C */
   levelTempC: Partial<Record<LevelKey, number>>;
+  /**
+   * 各等压面相对湿度 %（用于云相态判别：冰云 vs 水云）。
+   * 可选：旧版 localStorage 缓存里没有这个字段，缺失时引擎退回到温度判据。
+   */
+  levelHumidity?: Partial<Record<LevelKey, number>>;
+  /** 边界层高度 m（霾层厚度）。可选，缺失时按 0 处理 */
+  boundaryLayerM?: number;
+  /** 零度层高度 m（冰/水云分界的辅助判据）。可选 */
+  freezingLevelM?: number;
+  /** 地面直射辐射 W/m²（实测，用于反演云对直射光的削减） */
+  directRadiation?: number;
+  /** 地面散射辐射 W/m²（实测，用于反照黄昏散射照明的真实性） */
+  diffuseRadiation?: number;
+  /** 总短波辐射 W/m² */
+  shortwaveRadiation?: number;
+  /** 该小时累计日照秒数（3600 = 全晴） */
+  sunshineDurationS?: number;
   cloudLow: number;
   cloudMid: number;
   cloudHigh: number;
@@ -228,6 +245,20 @@ export interface DualHeadEstimate {
   advisory: 'none' | 'watch' | 'go';
   /** 该估计的样本外可靠度 0~1（未校准时为 0，接了实测标签后由拟合给出） */
   calibration: number;
+  /**
+   * 集合预报给出的概率（ECMWF 50 成员）。
+   *
+   * 与 `burnProbability` 的区别：后者是对单个确定性预报做逻辑斯蒂映射的启发式，
+   * 前者是**真的统计概率** —— 50 个扰动成员里落在"能烧"区间的比例。
+   * 集合请求昂贵（91.8 配额单位/次，免费额度 600/min），可能为 null。
+   */
+  ensemble?: {
+    probability: number;
+    members: number;
+    p10: number;
+    p50: number;
+    p90: number;
+  } | null;
 }
 
 export interface SunsetPredictionOutput {

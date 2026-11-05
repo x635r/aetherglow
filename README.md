@@ -220,15 +220,46 @@ npx wrangler pages deploy dist --project-name aetherglow
 
 ## 数据源与限流
 
-单次查询合并为 **3 个请求**（乐观并发）：
+单次查询合并为 **4 个请求**（前三个乐观并发，集合请求异步追加）：
 
-| 请求 | 内容 |
-|---|---|
-| `/v1/forecast` | 6 个环 × 3 个模型 × 22 个变量，一次批量 |
-| `/v1/air-quality` | 6 个环的 AOD / PM2.5 / 沙尘 / 湿度 |
-| `/v1/elevation` | 6 个环的真实 DEM 海拔 |
+| 请求 | 内容 | 配额成本 |
+|---|---|---|
+| `/v1/forecast` | 6 环 × 3 模型 × 40 变量，一次批量 | 1 次调用 |
+| `/v1/air-quality` | 6 环的 AOD / PM2.5 / 沙尘 | 1 次调用 |
+| `/v1/elevation` | 6 环的真实 DEM 海拔 | 1 次调用 |
+| `/v1/ensemble` | 3 环 × 6 变量 × **50 个 ECMWF 扰动成员** | **91.8 单位** |
 
 缓存策略：localStorage TTL 18 分钟（历史日期 6 小时），429 时指数退避重试（最多 3 次），同 URL 请求内存去重。
+
+### 实测验证过的变量（2026-11）
+
+Open-Meteo 会**接受很多参数名但恒返回 null**。下表全部经过逐变量非空率实测：
+
+| 变量 | 状态 | 用途 |
+|---|---|---|
+| `cloud_cover_XXXhPa` × 7 | ✅ 3 模型全可用 | 分层云量（核心） |
+| `geopotential_height_XXXhPa` × 7 | ✅ 全可用 | 层高度 |
+| `temperature_XXXhPa` × 7 | ✅ 全可用 | **云相态判别**（2026-11 接回） |
+| `relative_humidity_XXXhPa` × 7 | ✅ 全可用 | **冰云近饱和判据**（2026-11 新增） |
+| `direct_radiation` / `diffuse_radiation` | ✅ 全可用 | **实测散射/直射比**，替代经验 `diffuseWeight` |
+| `freezing_level_height` | ⚠️ GFS/ICON 有，ECMWF 无 | 冰/水云辅助判据，已做跨模型补齐 |
+| `boundary_layer_height` | ⚠️ **仅 GFS** | 霾层厚度（浅霾可越过），已做跨模型补齐 |
+| `cloud_base` / `cloud_top` | ❌ **参数被接受但 48/48 全 null** | 不可用，勿再尝试 |
+| `cloud_optical_depth` | ❌ 400 不支持 | — |
+| `aerosol_optical_depth_XXXnm` | ❌ 400 不支持（只有 550nm） | Ångström 只能由 dust/PM 比例推断 |
+| `ozone` | ⚠️ 是**近地面浓度**（µg/m³），非总柱量 | 不能用于 Chappuis 带 |
+
+### 集合预报：唯一真正统计意义的概率
+
+`/v1/ensemble` 返回 ECMWF 50 个扰动成员。我们让每个成员跑一套轻量评分
+（保留地影几何、云幕质量、角色并集、整层阴天/低云锁死否决），
+**落在"能烧"区间的成员比例就是概率** —— 不需要任何标定。
+
+**成本警告**：单次请求计费 **91.8 个配额单位**（`x-ratelimit-cost`），
+免费额度 600 单位/分钟 → **每分钟最多约 6 次**。因此：
+- localStorage 缓存 TTL 30 分钟
+- in-flight 去重
+- 失败静默返回 null，退回确定性估计，绝不重试轰炸
 
 ---
 

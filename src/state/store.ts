@@ -6,6 +6,8 @@ import { create } from 'zustand';
 import { predictSunset } from '../engine/SunsetPhysicsEngine';
 import type { ModelId, SunMode, SunsetPredictionOutput, GeoPoint, ForecastBundle } from '../engine/types';
 import { loadForecastBundle, resolveEvent, type ResolvedEvent } from '../data/openMeteo';
+import { fetchEnsembleProbability } from '../data/ensemble';
+import { sunPosition } from '../engine/astro';
 import { LEVEL_BY_KEY } from '../engine/constants';
 import type { LevelKey } from '../engine/constants';
 
@@ -197,6 +199,43 @@ export const useStore = create<Store>((set, get) => ({
         compareModels: query.models,
       });
       set({ prediction: pred });
+
+      // ── 集合概率（异步、独立、失败不影响主结果）──
+      // 深拷贝一份再替换，避免和后续 recompute 竞争同一个对象。
+      const seqAtCall = loadSeq;
+      if (query.mode === 'sunset' || query.mode === 'sunrise') {
+        void fetchEnsembleProbability({
+          point: query.point,
+          eventMs: resolved.eventMs,
+          mode: query.mode,
+          tzOffsetSeconds,
+          altitudeAt: (t: number) => sunPosition(t, query.point.lat, query.point.lon).altitude,
+        })
+          .then((ens) => {
+            // 只接受**当前**这次查询的结果；用户已切城市则丢弃
+            if (seqAtCall !== loadSeq) return;
+            const cur = get().prediction;
+            if (!cur || !ens) return;
+            set({
+              prediction: {
+                ...cur,
+                dual: {
+                  ...cur.dual,
+                  ensemble: {
+                    probability: ens.probability,
+                    members: ens.members,
+                    p10: ens.p10,
+                    p50: ens.p50,
+                    p90: ens.p90,
+                  },
+                },
+              },
+            });
+          })
+          .catch(() => {
+            /* 集合失败静默：主预测仍然有效 */
+          });
+      }
     } catch (e) {
       set({ error: (e as Error).message });
     }

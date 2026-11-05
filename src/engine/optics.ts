@@ -450,6 +450,42 @@ export const LEVEL_MICROPHYSICS: Record<string, { lwpGm2: number; reffUm: number
   '300': { lwpGm2: 15, reffUm: 26 },
 };
 
+/**
+ * 冰云的微物理修正。
+ *
+ * 「冰云是画布、水云是灰幕」是这个领域最一致的一条经验，原因在微物理：
+ * 冰晶的有效半径是水滴的 2–3 倍，而 τ = 3·LWP/(2·ρ·r_eff) ——
+ * **同样的冰水路径，冰云的光学厚度只有水云的 1/2 到 1/3**。
+ * 加上冰晶多为非球形、前向散射更强（不对称因子 g≈0.85 vs 0.87 但相函数更尖），
+ * 掠射光更容易穿过。
+ *
+ * 实测数据支撑（2026-11 用 Open-Meteo 气压层温度+湿度验证）：
+ * 300hPa T=−35.5°C，几乎必然是冰云；而旧代码把它按水云 r_eff=26µm 处理，
+ * 已经部分体现了这一点，但没有依据温度动态调整。
+ *
+ * @param tempC  该层温度 °C
+ * @param rh     该层相对湿度 %（冰云需要 RH 高；RH 很低说明只是干空气）
+ * @returns 光学厚度的乘子（1 = 完全水云，<1 = 偏冰云更透明）
+ */
+export function cloudPhaseTauFactor(tempC: number | undefined, rh: number | undefined): number {
+  if (tempC == null) return 1;
+
+  // 相态混合比例：0 = 全水，1 = 全冰。以 −12°C 为中心，跨度 ±8°C。
+  // （纯净水在 −38°C 仍可过冷，但气象尺度上 −12°C 以上基本是液态、
+  //   −20°C 以下在模式里通常按冰处理。）
+  const iceFrac = clamp((-(tempC) - 12) / 16, 0, 1);
+
+  // RH 修正：冰云要求接近饱和。RH<60% 时基本不可能有可观冰晶，
+  // 此时高云量更可能是模式的分层误差，不应该额外放大它的"画布"作用。
+  const rhFactor = rh == null ? 1 : clamp((rh - 55) / 30, 0.35, 1);
+
+  // 冰/水混合物的有效半径介于两者之间；τ 与 r_eff 反比
+  // 取 r_ice/r_water ≈ 2.2 → 全冰时 τ 降到 1/2.2 ≈ 0.45
+  const mixedFactor = 1 - iceFrac * (1 - 1 / 2.2);
+
+  return mixedFactor * rhFactor;
+}
+
 /** 云层全满时的光学厚度 τ_full = 3·LWP/(2·ρ_w·r_eff) */
 export function levelFullOpticalDepth(levelKey: string): number {
   const mp = LEVEL_MICROPHYSICS[levelKey];

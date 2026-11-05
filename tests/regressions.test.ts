@@ -109,6 +109,8 @@ describe('P0 光路剖面不再把好天气判成"已入地影"', () => {
       sample: sample(EVENT, cover),
       cover: Object.fromEntries(LEVEL_KEYS.map((k) => [k, cover[k] ?? 0])) as Record<LevelKey, number>,
       heightM: { ...STD_H } as Record<LevelKey, number>,
+      tempC: { '925': 10, '850': 5, '700': 0, '600': -2, '500': -10, '400': -20, '300': -35 } as Partial<Record<LevelKey, number>>,
+      rh: { '925': 80, '850': 80, '700': 70, '600': 65, '500': 60, '400': 55, '300': 50 } as Partial<Record<LevelKey, number>>,
       visible: Object.fromEntries(LEVEL_KEYS.map((k) => [k, true])) as Record<LevelKey, boolean>,
     }));
 

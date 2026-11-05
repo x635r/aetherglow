@@ -134,6 +134,18 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               <div className="mt-1.5 w-20">
                 <Bar value={p.dual.burnProbability} max={1} color="rgba(255,255,255,0.55)" height={3} />
               </div>
+              {p.dual.ensemble && (
+                <div
+                  className="num mt-1 text-[9px] leading-tight text-white/45"
+                  title={`集合预报：ECMWF ${p.dual.ensemble.members} 个扰动成员中，${Math.round(
+                    p.dual.ensemble.probability * 100,
+                  )}% 落在「能烧」区间。成员强度 p10/p50/p90 = ${p.dual.ensemble.p10.toFixed(
+                    2,
+                  )} / ${p.dual.ensemble.p50.toFixed(2)} / ${p.dual.ensemble.p90.toFixed(2)}。`}
+                >
+                  集合 {Math.round(p.dual.ensemble.probability * 100)}% · n={p.dual.ensemble.members}
+                </div>
+              )}
             </div>
 
             <div>
