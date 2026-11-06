@@ -30,10 +30,6 @@ export interface HourlySample {
   directRadiation?: number;
   /** 地面散射辐射 W/m²（实测，用于反照黄昏散射照明的真实性） */
   diffuseRadiation?: number;
-  /** 总短波辐射 W/m² */
-  shortwaveRadiation?: number;
-  /** 该小时累计日照秒数（3600 = 全晴） */
-  sunshineDurationS?: number;
   /**
    * 整层可降水总量 kg/m²（= mm）。
    *
@@ -49,10 +45,7 @@ export interface HourlySample {
   precipitation: number; // mm/h
   humidity: number; // %
   visibilityM: number; // m
-  weatherCode: number;
-  windSpeed: number; // km/h
-  windDir: number; // deg
-  dewPointC: number;
+  /** 地面气压 hPa —— 位势高度缺测时用于反演 MSL 高度 */
   surfacePressureHpa: number;
 }
 

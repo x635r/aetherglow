@@ -117,6 +117,8 @@ const ROLE_UNION_NORM = 1.25;
  * 才算真正“穿过该云幕”，而不是在两层的空隙里被虚假云量挡住。
  */
 const LEVEL_THICKNESS_M: Record<LevelKey, number> = {
+  // 1000hPa 是雾/层云，物理上非常薄（几十米到 200m）
+  '1000': 200,
   '925': 350,
   '850': 500,
   '700': 700,
@@ -124,6 +126,10 @@ const LEVEL_THICKNESS_M: Record<LevelKey, number> = {
   '500': 800,
   '400': 850,
   '300': 900,
+  // 250/200hPa 的卷云层在对流层上部，厚度可达 1–2km，但等压面间距大，
+  // 取 1000/1100 以免与相邻层重叠
+  '250': 1000,
+  '200': 1100,
 };
 
 /**
@@ -199,6 +205,39 @@ export function cloudScreenQuality(
   const presence = smoothstep(0.02, 0.12, c);
 
   return clamp(presence * coveragePreference * (0.15 + 0.85 * elementQuality) * dryness, 0, 1);
+}
+
+/**
+ * 层云量与「低/中/高云量汇总」的交叉校验 —— 剔除格点噪声。
+ *
+ * **为什么需要**：模式的 `cloud_cover_XXXhPa` 是逐等压面的格点值，
+ * 而 `cloud_cover_low/mid/high` 是同一模式对整层的汇总。两者**物理上必须相容**：
+ * 如果 700hPa 报 90% 而 mid 层汇总只有 10%，那多半是：
+ *  · 该格点落在云的边缘，等压面插值产生了虚假的高值
+ *  · 或者 summary 变量用的是不同的时空平均窗口
+ *
+ * 无论哪种原因，直接信任等压面值会让引擎在「模式自己都不一致」的地方
+ * 给出虚假的云幕质量。
+ *
+ * 判据：若单层云量显著高于其所归属层的汇总值（差值 > DISAGREE_THRESHOLD），
+ * 按差值比例降权 —— 但不归零，因为等压面值也可能比 summary 更准
+ * （summary 是区域/时间平均，等压面是逐点值）。
+ *
+ * @param levelCover  该等压面云量 0~1
+ * @param layerSummary 该层汇总云量 0~1（low/mid/high）
+ * @returns 降权系数 0.35~1
+ */
+export function crossCheckLayerCloud(levelCover: number, layerSummary: number): number {
+  const c = clamp(levelCover, 0, 1);
+  const s = clamp(layerSummary, 0, 1);
+  // 汇总值本身很小（<8%）时不做校验：那可能是 summary 的定义问题而非噪声
+  if (s < 0.08) return 1;
+  const excess = c - s;
+  // 允许 25% 的不一致（等压面可以局部更高）
+  if (excess <= 0.25) return 1;
+  // 超出部分线性降权，最多降到 0.35
+  const penalty = clamp(1 - (excess - 0.25) * 1.6, 0.35, 1);
+  return penalty;
 }
 
 /** 沿等压面按高度插值云量（用于绘图/兼容，不做物理消光用） */
@@ -335,7 +374,6 @@ export interface VerticalProfile {
     precipitation: number;
     humidity: number;
     visibilityM: number;
-    weatherCode: number;
     cloudTotal: number;
     cloudLow: number;
     cloudMid: number;
@@ -392,8 +430,6 @@ export function interpolateHourly(samples: HourlySample[], timeMs: number): Hour
     freezingLevelM: pick((s) => s.freezingLevelM ?? 0),
     directRadiation: pick((s) => s.directRadiation ?? 0),
     diffuseRadiation: pick((s) => s.diffuseRadiation ?? 0),
-    shortwaveRadiation: pick((s) => s.shortwaveRadiation ?? 0),
-    sunshineDurationS: pick((s) => s.sunshineDurationS ?? 0),
     totalColumnWaterVapour: pick((s) => s.totalColumnWaterVapour ?? 0),
     cloudLow: pick((s) => s.cloudLow),
     cloudMid: pick((s) => s.cloudMid),
@@ -402,10 +438,6 @@ export function interpolateHourly(samples: HourlySample[], timeMs: number): Hour
     precipitation: pick((s) => s.precipitation),
     humidity: pick((s) => s.humidity),
     visibilityM: pick((s) => s.visibilityM),
-    weatherCode: samples[0]?.weatherCode ?? 0,
-    windSpeed: pick((s) => s.windSpeed),
-    windDir: pick((s) => s.windDir),
-    dewPointC: pick((s) => s.dewPointC),
     surfacePressureHpa: pick((s) => s.surfacePressureHpa),
   };
 }
@@ -460,12 +492,20 @@ export function parseVerticalCloudProfile(
   /**
    * 跨模型补齐标量字段。
    *
-   * **实测发现**：`boundary_layer_height` 只有 GFS 提供（ECMWF/ICON 全 null），
-   * 而 `freezing_level_height` ECMWF 不提供。如果只用主源，这两个物理量在
-   * 主源为 ECMWF 时会永久缺失，接了等于没接。
-   * 它们都是**大尺度标量**（不像云量那样有强局地性），跨模型借用是可接受的。
+   * **实测发现**（逐模型探测非空率）：
+   *  · `boundary_layer_height` 只有 GFS 提供，ECMWF/ICON 全 null
+   *  · `freezing_level_height` ECMWF 不提供
+   *  · `visibility` **只有 GFS / DMI 提供，ECMWF 与 ICON 全 null**
+   *
+   * 如果只用主源，这些物理量在主源为 ECMWF（默认）时会永久缺失，接了等于没接。
+   * 它们都是**大尺度标量**（不像云量那样有强局地性），跨模型借用可接受。
+   *
+   * `visibility` 尤其关键：它缺失时 `completeness` 里的 `visOk` 永远为 0，
+   * 置信度上限被死锁在 88% —— 这是用户能直接看到的「数据完整度上不去」。
    */
-  const borrowScalar = (field: 'boundaryLayerM' | 'freezingLevelM'): number => {
+  const borrowScalar = (
+    field: 'boundaryLayerM' | 'freezingLevelM' | 'visibilityM',
+  ): number => {
     const own = wpick((s) => s[field] ?? 0);
     if (own > 0) return own;
     for (const m of Object.keys(bundle.models) as ModelId[]) {
@@ -497,9 +537,13 @@ export function parseVerticalCloudProfile(
     0,
     1,
   );
+  // 高云索引：从 2 层扩到 4 层（新增 250/200hPa 卷云顶）。
+  // 权重按高度递增 —— 越高的卷云在二烧阶段受光越久，贡献越大。
   const highIndex = clamp(
-    0.45 * cloudScreenQuality(cover['400'], 'high', '400') +
-      0.55 * cloudScreenQuality(cover['300'], 'high', '300'),
+    0.20 * cloudScreenQuality(cover['400'], 'high', '400') +
+      0.30 * cloudScreenQuality(cover['300'], 'high', '300') +
+      0.28 * cloudScreenQuality(cover['250'], 'high', '250') +
+      0.22 * cloudScreenQuality(cover['200'], 'high', '200'),
     0,
     1,
   );
@@ -512,8 +556,7 @@ export function parseVerticalCloudProfile(
       heightM,
       precipitation: wpick((s) => s.precipitation),
       humidity: wpick((s) => s.humidity),
-      visibilityM: wpick((s) => s.visibilityM),
-      weatherCode: near[0]?.sample.weatherCode ?? 0,
+      visibilityM: borrowScalar('visibilityM'),
       cloudTotal: wpick((s) => s.cloudTotal),
       cloudLow: wpick((s) => s.cloudLow),
       cloudMid: wpick((s) => s.cloudMid),
@@ -1276,7 +1319,17 @@ function evaluateLayer(
       visibleFactor = 1;
     }
 
-    const quality = cloudScreenQuality(cover, role, levelKey, ring.rh?.[levelKey]);
+    // 格点噪声校验：用该环自己的 low/mid/high 汇总值校验等压面云量。
+    // 两者不符说明模式在这一格点自相矛盾（云缘插值 / 平均窗口不同），
+    // 直接信任等压面值会产生虚假云幕。
+    const layerSummary = role === 'low'
+      ? (ring.sample?.cloudLow ?? 0) / 100
+      : role === 'high'
+        ? (ring.sample?.cloudHigh ?? 0) / 100
+        : (ring.sample?.cloudMid ?? 0) / 100;
+    const crossFactor = crossCheckLayerCloud(cover, layerSummary);
+
+    const quality = cloudScreenQuality(cover, role, levelKey, ring.rh?.[levelKey]) * crossFactor;
     if (quality <= 0) continue;
 
     // 近远权重：最近环满权，最远环 0.34 —— 不再有 0.55 的保底
@@ -1492,15 +1545,27 @@ function frameGuardsOf(
   const visM = profile.local.visibilityM;
   const boundaryLayerM = profile.local.boundaryLayerM ?? 0;
 
-  const lowDeck = Math.max(profile.local.cover['925'], profile.local.cover['850']);
+  // 有效低层云幕：把 1000hPa（雾/层云）也算进来 —— 它比 925hPa 更贴近地面，
+  // 满铺时是真正的「贴地灰幕」，比 850hPa 满铺更致命。
+  const lowDeck = Math.max(
+    profile.local.cover['1000'] ?? 0,
+    profile.local.cover['925'],
+    profile.local.cover['850'],
+  );
 
   // 低云锁死：**只看云**。上一版把 `visM < 3000` 塞进了这里，
   // 于是"云量 0%、能见度 2.5km 的干霾天"被报成「低云锁死 · 阴天」，
   // 文案自相矛盾（"本地低云 0%"）且建议"把机位升到云层之上"（对霾无用）。
+  // 雾层锁定：1000hPa（≈110m）云量 >70% 说明观测者基本在云/雾内部，
+  // 这种情况不需要看 925/850 —— 贴地灰幕已经把整个视野吃掉。
+  const fogDeckLocked = (profile.local.cover['1000'] ?? 0) >= 0.7 && observerMslM < 400;
+
   const lowLock =
     !cloudSeaActive &&
     belowBase &&
-    (lowDeck > 0.8 || (profile.local.cover['925'] > 0.75 && profile.local.cover['850'] > 0.55));
+    (fogDeckLocked ||
+      lowDeck > 0.8 ||
+      (profile.local.cover['925'] > 0.75 && profile.local.cover['850'] > 0.55));
 
   // 雾/霾单独一档：能见度太差导致近地层米氏消光吞掉地平线余晖。
   //
@@ -2182,7 +2247,8 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
     // 位势高度：是否拿到真实探空高度（而不是退回标称值）
     const sample = peakSnap.profile.rings[0]?.sample;
     const nominal: Record<LevelKey, number> = {
-      '925': 780, '850': 1500, '700': 3000, '600': 4200, '500': 5500, '400': 7200, '300': 9200,
+      '1000': 110, '925': 780, '850': 1500, '700': 3000, '600': 4200,
+      '500': 5500, '400': 7200, '300': 9200, '250': 10400, '200': 11800,
     };
     let heightReal = 0;
     let heightTotal = 0;

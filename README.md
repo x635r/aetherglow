@@ -37,7 +37,11 @@ AetherGlow 把「云为什么会被点着」拆成四个互相独立的物理量
 
 ### Step 2 — 等压面加密云层与黄金云层提取
 
-七个等压面：`925 / 850 / 700 / 600 / 500 / 400 / 300 hPa`，各自取**云量 + 位势高度**（位势高度缺测时用标准大气反演兜底）。
+**十个等压面**：`1000 / 925 / 850 / 700 / 600 / 500 / 400 / 300 / 250 / 200 hPa`，各自取**云量 + 位势高度 + 温度 + 相对湿度**。
+
+> 只取**三模型交集**的层：逐模型实测 GFS 20 层、ICON 15 层、**ECMWF 仅 12 层**。
+> 扩到 21 层会让默认主源 ECMWF 大部分为空，反而更差。
+> 新增的三层：`1000hPa`（雾/层云，此前完全缺失）、`250/200hPa`（卷云顶，二烧的最后画布）。
 
 - 黄金层 = 600 / 500 hPa（约 4.2 / 5.5 km）—— 火烧云主战场
 - 高云层 = 400 / 300 hPa（约 7.2 / 9.2 km）—— 紫霞二烧来源
@@ -146,7 +150,7 @@ score_r = 质量 × 受光 × T_to_ring × 可见性 × 近远权重
 - **Canvas**：自研 2D 光路剖面渲染器（`src/render/sectionRenderer.ts`）
 - **状态**：Zustand
 - **数据**：Open-Meteo（ECMWF IFS / NOAA GFS / DWD ICON）+ CAMS 气溶胶 + Copernicus DEM
-- **测试**：Vitest，98 个用例（含 10 个物理校准场景 + 45 个不变量回归）
+- **测试**：Vitest，**206 个用例**（校准 13 · 物理单元 36 · 不变量 48 · 回归 68 · 集合 11 · 验证指标 27 · 极区 3）
 
 ## 目录结构
 
@@ -159,18 +163,26 @@ aetherglow/
 ├── postcss.config.js
 ├── tsconfig.json
 ├── wrangler.toml                  # Cloudflare Pages 配置
+├── docs/
+│   └── RESEARCH-2026-11.md        # 全网调研（SunsetBot 教程全量数据 / 数据源审计 / 对标）
+├── tools/
+│   └── validate.ts                # 验证脚手架（CSV 标签 → Brier/AUC/TSS/混淆矩阵）
+├── labels.example.csv             # 实测标签模板
+├── CHANGELOG-physics.md           # 两轮修复记录
 ├── src/
 │   ├── main.tsx
 │   ├── App.tsx                    # Bento Grid 布局装配
 │   ├── engine/
 │   │   ├── SunsetPhysicsEngine.ts # 五步管线主入口
 │   │   ├── astro.ts               # 太阳位置 / 日出日落 / 球面大圆
-│   │   ├── optics.ts              # 光路几何 / 地影 / 单色消光
-│   │   ├── spectral.ts            # CAMS 气溶胶光谱消光
+│   │   ├── optics.ts              # 光路几何 / 地影 / 云相态 / 概率化云隙 / 有效地面
+│   │   ├── spectral.ts            # CAMS 气溶胶光谱消光 / AOD 污烧门槛
 │   │   ├── constants.ts           # 物理常量 / 分级 / 主题色
 │   │   └── types.ts               # 全量类型定义
 │   ├── data/
-│   │   ├── openMeteo.ts           # 批量请求 / 缓存 / 429 退避
+│   │   ├── openMeteo.ts           # 批量请求 / 跨模型补齐 / 缓存 / 429 退避
+│   │   ├── ensemble.ts            # ECMWF 50 成员集合概率（成本 91.8 单位/次）
+│   │   ├── ozone.ts               # NASA POWER 臭氧总柱量
 │   │   └── geocode.ts             # 城市搜索与快捷入口
 │   ├── render/
 │   │   └── sectionRenderer.ts     # 光路剖面 Canvas 渲染
@@ -191,10 +203,14 @@ aetherglow/
 │           ├── DiagnosticsCard.tsx# 逐层可追溯诊断
 │           └── SkyMapCard.tsx     # 区域热力分布
 └── tests/
-    ├── engine.test.ts             # 物理单元测试
-    ├── invariants.test.ts         # 物理不变量与端到端回归（45 个）
-    ├── calibrationScenarios.ts    # 10 个典型场景
-    └── calibration.test.ts        # 校准回归
+    ├── engine.test.ts             # 物理单元（36）
+    ├── invariants.test.ts         # 物理不变量与端到端回归（48）
+    ├── regressions.test.ts        # 审查缺陷回归（68，每项对应一个曾存在的 bug）
+    ├── ensemble.test.ts           # 集合评分（11）
+    ├── validation.metrics.test.ts # 验证指标定义（27）
+    ├── calibrationScenarios.ts    # 11 个典型场景
+    ├── calibration.test.ts        # 校准回归（13）
+    └── polar.test.ts              # 极区边界（3）
 ```
 
 ---
@@ -205,7 +221,8 @@ aetherglow/
 npm install
 npm run dev        # http://127.0.0.1:5199
 npm run build      # 类型检查 + 生产构建
-npm test           # 98 个物理测试
+npm test           # 206 个测试
+npm run validate   # 用实测标签评估准确率（见下方「验证」）
 ```
 
 ## 部署到 Cloudflare Pages

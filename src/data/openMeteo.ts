@@ -56,6 +56,7 @@ const HOURLY_VARS = [
   ...PRESSURE_LEVELS.map((l) => `geopotential_height_${l.hpa}hPa`),
   ...PRESSURE_LEVELS.map((l) => `temperature_${l.hpa}hPa`),
   ...PRESSURE_LEVELS.map((l) => `relative_humidity_${l.hpa}hPa`),
+  // ── 低/中/高云量（用于第 5 项的格点噪声校验，见 crossCheckLayerCloud）──
   'cloud_cover_low',
   'cloud_cover_mid',
   'cloud_cover_high',
@@ -63,20 +64,13 @@ const HOURLY_VARS = [
   'precipitation',
   'relative_humidity_2m',
   'visibility',
-  'weather_code',
-  'wind_speed_10m',
-  'wind_direction_10m',
-  'dew_point_2m',
   'surface_pressure',
   // ── 2026-11 新增（均已实测非空）──
   'boundary_layer_height',
   'freezing_level_height',
   'direct_radiation',
   'diffuse_radiation',
-  'shortwave_radiation',
-  'sunshine_duration',
   'total_column_integrated_water_vapour',
-  'temperature_2m',
 ];
 
 const AIR_VARS = ['aerosol_optical_depth', 'dust', 'pm2_5', 'pm10', 'relative_humidity_2m'];
@@ -379,8 +373,6 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       freezingLevelM: Math.max(0, numOrNull(series(hourly, 'freezing_level_height', model)[i]) ?? 0),
       directRadiation: Math.max(0, num(series(hourly, 'direct_radiation', model)[i])),
       diffuseRadiation: Math.max(0, num(series(hourly, 'diffuse_radiation', model)[i])),
-      shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
-      sunshineDurationS: Math.max(0, num(series(hourly, 'sunshine_duration', model)[i])),
       totalColumnWaterVapour: Math.max(0, numOrNull(series(hourly, 'total_column_integrated_water_vapour', model)[i]) ?? 0),
       cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
       cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
@@ -389,10 +381,6 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       precipitation: Math.max(0, num(series(hourly, 'precipitation', model)[i])),
       humidity: clamp(num(series(hourly, 'relative_humidity_2m', model)[i], 55), 0, 100),
       visibilityM: visMs,
-      weatherCode: Math.round(num(series(hourly, 'weather_code', model)[i])),
-      windSpeed: num(series(hourly, 'wind_speed_10m', model)[i]),
-      windDir: num(series(hourly, 'wind_direction_10m', model)[i]),
-      dewPointC: num(series(hourly, 'dew_point_2m', model)[i]),
       surfacePressureHpa: sp,
     });
   }

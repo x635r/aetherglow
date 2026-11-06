@@ -37,7 +37,8 @@ import type { ForecastBundle, HourlySample, ModelId } from '../src/engine/types'
 // ── 测试夹具 ────────────────────────────────────────────────────────────
 
 const STD_H: Record<LevelKey, number> = {
-  '925': 780, '850': 1500, '700': 3000, '600': 4200, '500': 5500, '400': 7200, '300': 9200,
+  '1000': 110, '925': 780, '850': 1500, '700': 3000, '600': 4200,
+  '500': 5500, '400': 7200, '300': 9200, '250': 10400, '200': 11800,
 };
 
 function mkSample(t: number, cover: Partial<Record<LevelKey, number>>, precip = 0): HourlySample {
@@ -51,8 +52,7 @@ function mkSample(t: number, cover: Partial<Record<LevelKey, number>>, precip = 
     timeMs: t, cloud, levelHeightM, levelTempC: {},
     cloudLow: 0, cloudMid: 0, cloudHigh: 0,
     cloudTotal: Math.max(...LEVEL_KEYS.map((k) => cloud[k])),
-    precipitation: precip, humidity: 55, visibilityM: 25000, weatherCode: 0,
-    windSpeed: 8, windDir: 250, dewPointC: 10, surfacePressureHpa: 1013,
+    precipitation: precip, humidity: 55, visibilityM: 25000, surfacePressureHpa: 1013,
   };
 }
 

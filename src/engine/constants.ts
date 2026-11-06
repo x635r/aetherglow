@@ -20,7 +20,29 @@ export const R_EFF_KM = 7435;
 export const RING_KM = [0, 30, 80, 150, 280, 450] as const;
 
 /** 等压面层定义（含标准大气标称高度，作为缺测时的回退值） */
+/**
+ * 等压面层定义 —— **只取三模型交集的层**。
+ *
+ * 逐模型实测（`cloud_cover_XXXhPa` 非空率）：
+ *   GFS    20 层：1000/950/925/900/850/800/750/700/650/600/550/500/450/400/350/300/250/200/150/100
+ *   ICON   15 层：1000/950/925/900/850/800/700/600/500/400/300/250/200/150/100
+ *   ECMWF  **仅 12 层**：1000/925/850/700/600/500/400/300/250/200/150/100
+ *
+ * 天真地扩到 21 层会让 ECMWF（默认主源）大部分为空，反而更差。
+ * 所以只取**三模型都有**的层，缺一层就整体不可比。
+ *
+ * 从 7 层扩到 10 层，新增的三层各有明确用途：
+ *   · `1000hPa`（≈110m）—— **雾 / 层云**。此前完全没有，导致近地面阴雾
+ *     只能靠 925hPa（780m）间接推断，漏判率高
+ *   · `250hPa`（≈10.4km）/ `200hPa`（≈11.8km）—— 高空卷云顶。
+ *     教程说卷云底 >6000m、厚 2–3km，云顶正好落在这一带；
+ *     这是「二烧」的最后画布
+ *
+ * 不取 `150hPa`（≈14km）/ `100hPa`（≈16km）：已在对流层顶附近
+ * （上海对流层顶 16–17km），云极少，多为模式噪声。
+ */
 export const PRESSURE_LEVELS = [
+  { key: '1000', hpa: 1000, nominalM: 110, role: 'low', label: '1000hPa 雾/层云' },
   { key: '925', hpa: 925, nominalM: 780, role: 'low', label: '925hPa 底层云' },
   { key: '850', hpa: 850, nominalM: 1500, role: 'low', label: '850hPa 低云' },
   { key: '700', hpa: 700, nominalM: 3000, role: 'mid', label: '700hPa 中云' },
@@ -28,6 +50,8 @@ export const PRESSURE_LEVELS = [
   { key: '500', hpa: 500, nominalM: 5500, role: 'golden', label: '500hPa 黄金高积云' },
   { key: '400', hpa: 400, nominalM: 7200, role: 'high', label: '400hPa 卷云' },
   { key: '300', hpa: 300, nominalM: 9200, role: 'high', label: '300hPa 高空卷云' },
+  { key: '250', hpa: 250, nominalM: 10400, role: 'high', label: '250hPa 卷云顶' },
+  { key: '200', hpa: 200, nominalM: 11800, role: 'high', label: '200hPa 极高卷云' },
 ] as const;
 
 export type LevelKey = (typeof PRESSURE_LEVELS)[number]['key'];

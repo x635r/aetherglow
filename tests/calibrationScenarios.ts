@@ -12,6 +12,7 @@ import type { LevelKey } from '../src/engine/constants';
 import { predictSunset } from '../src/engine/SunsetPhysicsEngine';
 
 const stdH: Record<LevelKey, number> = {
+  '1000': 110,
   '925': 780,
   '850': 1500,
   '700': 3000,
@@ -19,6 +20,8 @@ const stdH: Record<LevelKey, number> = {
   '500': 5500,
   '400': 7200,
   '300': 9200,
+  '250': 10400,
+  '200': 11800,
 };
 
 export interface Scenario {
@@ -55,10 +58,6 @@ function mkSample(t: number, sc: Scenario): HourlySample {
     precipitation: sc.precip ?? 0,
     humidity: sc.humidity ?? 55,
     visibilityM: sc.visibilityM ?? 25000,
-    weatherCode: 0,
-    windSpeed: 8,
-    windDir: 250,
-    dewPointC: 10,
     surfacePressureHpa: 1013,
   };
 }

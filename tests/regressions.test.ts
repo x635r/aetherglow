@@ -24,6 +24,7 @@ import {
 } from '../src/engine/optics';
 import {
   cloudScreenQuality,
+  crossCheckLayerCloud,
   parseVerticalCloudProfile,
   predictSunset,
   rayMarchingTransmittance,
@@ -34,7 +35,8 @@ import type { LevelKey } from '../src/engine/constants';
 import type { ForecastBundle, HourlySample, ModelId } from '../src/engine/types';
 
 const STD_H: Record<LevelKey, number> = {
-  '925': 780, '850': 1500, '700': 3000, '600': 4200, '500': 5500, '400': 7200, '300': 9200,
+  '1000': 110, '925': 780, '850': 1500, '700': 3000, '600': 4200,
+  '500': 5500, '400': 7200, '300': 9200, '250': 10400, '200': 11800,
 };
 
 const EVENT = Date.UTC(2026, 10, 3, 9, 5, 0);
@@ -51,8 +53,7 @@ function sample(t: number, cover: Partial<Record<LevelKey, number>>, o: { precip
     cloudLow: 0, cloudMid: 0, cloudHigh: 0, cloudTotal: 0,
     precipitation: o.precip ?? 0,
     humidity: o.humidity ?? 50,
-    visibilityM: o.vis ?? 25000,
-    weatherCode: 0, windSpeed: 4, windDir: 250, dewPointC: 5, surfacePressureHpa: 1013,
+    visibilityM: o.vis ?? 25000, surfacePressureHpa: 1013,
   };
 }
 
@@ -779,5 +780,74 @@ describe('P1 分档对齐行业口径', () => {
     for (let i = 1; i < GRADES.length; i++) {
       expect(GRADES[i].max).toBeGreaterThan(GRADES[i - 1].max);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 18. 格点噪声交叉校验（cloudLow/Mid/High 与等压面云量的一致性）
+// ═══════════════════════════════════════════════════════════════════════
+describe('P2 格点噪声交叉校验', () => {
+  it('等压面与层汇总一致时不惩罚', () => {
+    expect(crossCheckLayerCloud(0.9, 0.85)).toBe(1);
+    expect(crossCheckLayerCloud(0.5, 0.5)).toBe(1);
+  });
+
+  it('等压面远高于层汇总时显著降权', () => {
+    // 700hPa 报 90% 但 mid 汇总只有 10% —— 模式自相矛盾
+    expect(crossCheckLayerCloud(0.9, 0.1)).toBeLessThan(0.4);
+  });
+
+  it('等压面低于汇总时不惩罚（局部可以更少）', () => {
+    expect(crossCheckLayerCloud(0.3, 0.8)).toBe(1);
+  });
+
+  it('汇总值过小（<8%）时不校验', () => {
+    // 汇总接近 0 可能是 summary 的定义问题，不是噪声
+    expect(crossCheckLayerCloud(0.9, 0.05)).toBe(1);
+  });
+
+  it('降权系数有下界，不会归零', () => {
+    expect(crossCheckLayerCloud(1.0, 0.09)).toBeGreaterThanOrEqual(0.35);
+  });
+
+  it('不一致越大，降权越重（单调）', () => {
+    const vals = [0.4, 0.5, 0.6, 0.7, 0.8].map((c) => crossCheckLayerCloud(c, 0.3));
+    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeLessThanOrEqual(vals[i - 1]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 19. 10 层等压面（新增 1000 / 250 / 200hPa）
+// ═══════════════════════════════════════════════════════════════════════
+describe('P1 十层等压面', () => {
+  it('层数从 7 扩到 10', () => {
+    expect(LEVEL_KEYS).toHaveLength(10);
+    expect(LEVEL_KEYS).toContain('1000');
+    expect(LEVEL_KEYS).toContain('250');
+    expect(LEVEL_KEYS).toContain('200');
+  });
+
+  it('新增卷云顶层真的会加分（二烧画布）', () => {
+    const base = predict(bundle(C({ '600': 0.45, '500': 0.4 }), { aod: 0.08 }));
+    const withTop = predict(bundle(C({ '600': 0.45, '500': 0.4, '250': 0.6 }), { aod: 0.08 }));
+    expect(withTop.vividness).toBeGreaterThan(base.vividness);
+  });
+
+  it('1000hPa 满铺（雾/层云贴地）触发低云锁定', () => {
+    const p = predict(bundle(C({ '1000': 0.9, '600': 0.45, '500': 0.4 }), { aod: 0.08 }));
+    expect(p.veto.kind).toBe('low-cloud-lock');
+    expect(p.vividness).toBeLessThan(0.4);
+  });
+
+  it('1000hPa 完全无云时不改变任何东西', () => {
+    const a = predict(bundle(C({ '600': 0.45, '500': 0.4 }), { aod: 0.08 }));
+    const b = predict(bundle(C({ '1000': 0, '600': 0.45, '500': 0.4 }), { aod: 0.08 }));
+    expect(b.vividness).toBeCloseTo(a.vividness, 6);
+  });
+
+  it('层高度随气压降低单调升高', () => {
+    const p = predict(bundle(C({ '600': 0.45 })));
+    const hs = LEVEL_KEYS.map((k) => p.layers.find((l) => l.key === k)!.altitudeM);
+    for (let i = 1; i < hs.length; i++) expect(hs[i]).toBeGreaterThan(hs[i - 1]);
   });
 });

@@ -516,6 +516,9 @@ export function directBeamAirmass(
  * 当成浓积云，把教科书级的"整片卷云全烧"判成无烧。
  */
 export const LEVEL_MICROPHYSICS: Record<string, { lwpGm2: number; reffUm: number }> = {
+  // 1000hPa 层：雾 / 层云。LWP 小（雾含水量 0.05 g/m³ × ~100m ≈ 5 g/m²），
+  // r_eff 10µm → τ_full ≈ 0.75，是「薄灰幕」而非不透明层
+  '1000': { lwpGm2: 8, reffUm: 10 },
   '925': { lwpGm2: 130, reffUm: 10 },
   '850': { lwpGm2: 120, reffUm: 10 },
   '700': { lwpGm2: 100, reffUm: 10 },
@@ -523,6 +526,9 @@ export const LEVEL_MICROPHYSICS: Record<string, { lwpGm2: number; reffUm: number
   '500': { lwpGm2: 50, reffUm: 16 },
   '400': { lwpGm2: 25, reffUm: 22 },
   '300': { lwpGm2: 15, reffUm: 26 },
+  // 250/200hPa：极端稀薄的卷云顶。LWP(IWP) 5–8 g/m²、冰晶 r_eff 30µm（ISCCP）
+  '250': { lwpGm2: 8, reffUm: 30 },
+  '200': { lwpGm2: 5, reffUm: 30 },
 };
 
 /**
