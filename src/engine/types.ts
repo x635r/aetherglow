@@ -59,18 +59,18 @@ export interface HourlySample {
    */
   cape?: number;
   /**
-   * 高空风（700/500/300 hPa）—— 用于**半拉格朗日平流插值**。
+   * 高空风（**只保留 500hPa**）—— 用于半拉格朗日平流插值。
    *
    * 云场是被风平移输运的，逐点线性插值会把"云还没到"与"云已走"
    * 平均成一片均匀云，抹平峰值时刻并漂移云洞位置。有了高空风，
    * 就能把上游的云量平移到当前时刻，恢复相位信息。
+   *
+   * 只留 500hPa：它最代表"画布层"（黄金高积云）的输运。
+   * 700hPa 偏局地湍流、300hPa 太快且多位于卷云之上 —— 那两个层的
+   * 风速风向请求了但代码里从未消费，属于纯成本浪费，已从请求中删除。
    */
-  windSpeed700?: number;
-  windDir700?: number;
   windSpeed500?: number;
   windDir500?: number;
-  windSpeed300?: number;
-  windDir300?: number;
   cloudLow: number;
   cloudMid: number;
   cloudHigh: number;

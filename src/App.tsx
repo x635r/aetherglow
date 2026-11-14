@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from './state/store';
 import { TopBar } from './ui/TopBar';
 import { HeroScore } from './ui/cards/HeroScore';
@@ -13,7 +13,7 @@ import { GRADE_THEME } from './engine/constants';
 import type { ModelId } from './engine/types';
 
 export default function App() {
-  const { status, error, prediction: p, load, query, setQuery } = useStore();
+  const { status, error, prediction: p, load, query, setQuery, quotaResetAtMs, stale, staleAgeMs } = useStore();
 
   // 首次加载
   useEffect(() => {
@@ -31,7 +31,31 @@ export default function App() {
       <TopBar />
 
       <main className="relative z-10 mx-auto max-w-[1560px] px-3 pb-16 pt-3 sm:px-5 sm:pt-4">
-        {status === 'error' && <ErrorBanner message={error} onRetry={() => load({ force: true })} />}
+        {status === 'error' && (
+          <ErrorBanner
+            message={error}
+            // **不再 force 绕过缓存**：额度耗尽时 force 只会继续撞 429。
+            // 普通刷新会优先命中（过期但在保留期内的）缓存。
+            onRetry={() => load({ force: false })}
+            resetAtMs={quotaResetAtMs}
+            hasStaleData={p != null}
+          />
+        )}
+        {status !== 'error' && stale && p != null && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-sky-400/25 bg-sky-950/20 px-4 py-2.5">
+            <span className="text-[11.5px] font-medium text-sky-200">非实时数据</span>
+            <span className="min-w-0 flex-1 text-[11px] text-sky-300/70 break-anywhere">
+              数据源暂时不可用，当前展示的是 {Math.round((staleAgeMs || 0) / 60000)} 分钟前的缓存。日落后请以实况为准。
+            </span>
+            <button
+              type="button"
+              onClick={() => load({ force: true })}
+              className="btn-ghost shrink-0 !border-sky-300/30 !text-sky-200"
+            >
+              尝试刷新
+            </button>
+          </div>
+        )}
 
         {/* Bento Grid：12 列栅格，移动端单列 */}
         <div className="grid grid-cols-1 gap-3 sm:gap-3.5 lg:grid-cols-12">
@@ -98,11 +122,72 @@ function Aurora({ accent, secondary }: { accent: string; secondary: string }) {
   );
 }
 
-function ErrorBanner({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+/**
+ * 错误横幅。
+ *
+ * **两种错误必须区别对待**：
+ *  · 普通网络错误 → 给「重试」按钮
+ *  · 额度耗尽     → **不给**「强制重试」按钮（点了还是 429，只会让用户更困惑），
+ *    改为显示恢复倒计时，并把「重试」降级为不绕过缓存的普通刷新
+ *
+ * 另外：如果已有数据（`hasStaleData`），横幅要说明"下方显示的是旧数据"，
+ * 而不是让用户以为页面坏了。
+ */
+function ErrorBanner({
+  message,
+  onRetry,
+  resetAtMs,
+  hasStaleData,
+}: {
+  message: string | null;
+  onRetry: () => void;
+  resetAtMs?: number;
+  hasStaleData?: boolean;
+}) {
+  // 倒计时：每秒刷新。额度恢复后按钮自动回到可用状态。
+  const [now, setNow] = useState(() => Date.now());
+  const quota = resetAtMs != null && resetAtMs > 0;
+  useEffect(() => {
+    if (!quota) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [quota]);
+
+  const remainMs = quota ? Math.max(0, resetAtMs! - now) : 0;
+  const remainMin = Math.ceil(remainMs / 60000);
+  const recovered = quota && remainMs <= 0;
+
+  if (quota) {
+    return (
+      <div className="mb-3 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-400/30 bg-amber-950/20 px-4 py-3">
+        <span className="text-[12px] font-medium text-amber-200">
+          {recovered ? '额度已恢复' : '数据源额度耗尽'}
+        </span>
+        <span className="min-w-0 flex-1 text-[11px] text-amber-200/70 break-anywhere">
+          {recovered
+            ? 'Open-Meteo 的小时额度已重置，可以重新拉取。'
+            : `Open-Meteo 免费额度（5000 单位/小时）已用尽，约 ${remainMin} 分钟后恢复。本应用单次查询约消耗 112 单位（3 模型 × 6 环 × 62 变量）。`}
+          {hasStaleData && ' 下方展示的是最近一次成功获取的数据。'}
+        </span>
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={!recovered}
+          className="btn-ghost shrink-0 !border-amber-300/30 !text-amber-200 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {recovered ? '重新拉取' : `${remainMin} 分钟后重试`}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="mb-3 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/30 bg-rose-950/25 px-4 py-3">
       <span className="text-[12px] font-medium text-rose-200">数据请求失败</span>
-      <span className="min-w-0 flex-1 text-[11px] text-rose-300/75 break-anywhere">{message ?? '未知错误'}</span>
+      <span className="min-w-0 flex-1 text-[11px] text-rose-300/75 break-anywhere">
+        {message ?? '未知错误'}
+        {hasStaleData && ' · 下方展示的是最近一次成功获取的数据'}
+      </span>
       <button type="button" onClick={onRetry} className="btn-ghost shrink-0 !border-rose-300/30 !text-rose-200">
         重试
       </button>

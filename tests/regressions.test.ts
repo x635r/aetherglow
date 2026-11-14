@@ -45,6 +45,7 @@ import {
   rayMarchingTransmittance,
 } from '../src/engine/SunsetPhysicsEngine';
 import { advectionLagMs, sampleAdvected } from '../src/engine/astro';
+import { QuotaExhaustedError } from '../src/data/openMeteo';
 import { evaluateSpectral } from '../src/engine/spectral';
 import { GRADES, LEVEL_KEYS } from '../src/engine/constants';
 import type { LevelKey } from '../src/engine/constants';
@@ -1409,5 +1410,29 @@ describe('COT 反演的晴空基线（实测发现的真实缺陷）', () => {
   it('太阳太低（无法算晴空基线）时返回 null', () => {
     expect(inferCloudOpticalDepthFromRadiation(10, 100, 0.2, 0.1)).toBeNull();
     expect(inferCloudOpticalDepthFromRadiation(10, 100, 4.9, 0.1)).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 23. 额度耗尽：不得让整页变空白（2026-11 线上事故）
+// ═══════════════════════════════════════════════════════════════════════
+describe('额度耗尽时的降级行为', () => {
+  it('QuotaExhaustedError 的 message 包含可读的分钟数，而不是裸毫秒', () => {
+    const resetAt = Date.now() + 17 * 60000;
+    const e = new QuotaExhaustedError(resetAt, 17 * 60000);
+    // 必须能读出"17 分钟"这类信息
+    expect(e.message).toMatch(/\d+\s*分钟/);
+    // 不能是原始的 "retry after 1172000ms"
+    expect(e.message).not.toMatch(/retry after \d+ms/);
+    // 必须说明这不是本地故障，并给出额度与单次成本
+    expect(e.message).toContain('5000');
+    expect(e.resetAtMs).toBe(resetAt);
+  });
+
+  it('resetAtMs 未知时也给可读文案，不崩', () => {
+    const e = new QuotaExhaustedError(0, 0);
+    expect(e.message).toContain('额度');
+    expect(Number.isFinite(e.resetAtMs)).toBe(true);
+    expect(e.resetAtMs).toBe(0);
   });
 });

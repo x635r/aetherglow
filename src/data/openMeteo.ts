@@ -82,13 +82,14 @@ const HOURLY_VARS = [
   // 深对流识别：CAPE 高 + 强降水 = 积雨云黑幕，不该当画布
   'cape',
   // ── 高空风场：用于半拉格朗日平流插值（峰值时刻与云洞位置的相位修正）──
-  // 实测 ECMWF 全层非空（700/500/300hPa 速度与风向均 24/24）
-  'wind_speed_700hPa',
-  'wind_direction_700hPa',
+  //
+  // **只要 500hPa 一层**。实测确认：平流插值只消费 `windSpeed500` /
+  // `windDir500`（它最代表"画布层"的输运）；700hPa 偏局地湍流、
+  // 300hPa 太快且多位于卷云之上，两者的 wind 变量请求了但代码里
+  // 从未读取 —— 每多一个变量，单次查询多 0.102 × 地点数 单位。
+  // 删掉 4 个变量 = 单次查询省 4 × 0.102 × 6 环 × 3 模型 ≈ 7.3 单位。
   'wind_speed_500hPa',
   'wind_direction_500hPa',
-  'wind_speed_300hPa',
-  'wind_direction_300hPa',
 ];
 
 const AIR_VARS = ['aerosol_optical_depth', 'dust', 'pm2_5', 'pm10', 'relative_humidity_2m'];
@@ -99,12 +100,78 @@ const AIR_VARS = ['aerosol_optical_depth', 'dust', 'pm2_5', 'pm10', 'relative_hu
 
 const inflight = new Map<string, Promise<unknown>>();
 
+/**
+ * 额度耗尽错误。
+ *
+ * **为什么要专门的类**：上一版把 429 一律塞进 `RateLimitError`
+ * （`retryAfterMs` 来自 `Retry-After` 头），而界面直接 `message` 透传，
+ * 于是用户看到的是裸的毫秒数：
+ *
+ *     气象场请求失败：Rate limited, retry after 1172000ms
+ *
+ * 1172000ms 对用户毫无意义 —— 它既没说"是什么额度"、也没说"多少分钟"、
+ * 更没说"能做什么"。而且 `RateLimitError` 会被 `fetchJson` 自动重试
+ * （`attempt < 3`），在额度耗尽时**白撞 3 次**，每次都在扩大问题。
+ *
+ * 现在把两种 429 分开：
+ *  · `QuotaExhaustedError` —— 小时/日额度打满。**绝不重试**（额度是窗口级
+ *    的，分钟内重试必然还是 429），携带 `resetAtMs` 供 UI 显示倒计时
+ *  · `RateLimitError` —— 瞬时突发限流（分钟窗口）。可以短退避重试
+ */
+export class QuotaExhaustedError extends Error {
+  /** 额度恢复的时刻 (epoch ms)；未知时为 0 */
+  resetAtMs: number;
+  /** 服务端建议的重试等待 (ms) */
+  retryAfterMs: number;
+  constructor(resetAtMs: number, retryAfterMs: number) {
+    const mins = resetAtMs > 0 ? Math.max(1, Math.ceil((resetAtMs - Date.now()) / 60000)) : 0;
+    super(
+      mins > 0
+        ? `Open-Meteo 小时额度已用尽，约 ${mins} 分钟后恢复。这不是本地故障 —— 免费额度为 5000 单位/小时，本应用单次查询消耗约 112 单位（3 模型 × 6 环 × 62 变量）。`
+        : 'Open-Meteo 小时额度已用尽。这不是本地故障 —— 请稍后重试。',
+    );
+    this.name = 'QuotaExhaustedError';
+    this.resetAtMs = resetAtMs;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 class RateLimitError extends Error {
   retryAfterMs: number;
   constructor(retryAfterMs: number) {
     super(`Rate limited, retry after ${retryAfterMs}ms`);
     this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * 解析 429 响应，区分「额度耗尽」与「瞬时限流」。
+ *
+ * 判据（实测 Open-Meteo 行为）：
+ *  · `X-RateLimit-Remaining: 0` 且 `X-RateLimit-Window` ≥ 60
+ *    → 是整个窗口的额度用完了，重试无用
+ *  · 有 `Retry-After` 但 remaining 不为 0 → 突发限流，可短退避
+ */
+function classify429(res: Response, attempt: number): Error {
+  const resetSec = Number(res.headers.get('x-ratelimit-reset'));
+  const remaining = Number(res.headers.get('x-ratelimit-remaining'));
+  const windowSec = Number(res.headers.get('x-ratelimit-window'));
+  const retryAfterSec = Number(res.headers.get('retry-after'));
+
+  const resetAtMs = Number.isFinite(resetSec) && resetSec > 1e9 ? resetSec * 1000 : 0;
+  const retryAfterMs =
+    Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? retryAfterSec * 1000
+      : resetAtMs > Date.now()
+        ? resetAtMs - Date.now()
+        : 0;
+
+  const exhausted =
+    Number.isFinite(remaining) && remaining <= 0 &&
+    Number.isFinite(windowSec) && windowSec >= 60;
+
+  if (exhausted) return new QuotaExhaustedError(resetAtMs, retryAfterMs);
+  return new RateLimitError(retryAfterMs > 0 ? retryAfterMs : 2500 * Math.pow(2, attempt));
 }
 
 async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Promise<T> {
@@ -116,8 +183,7 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
   const task = (async (): Promise<T> => {
     const res = await fetch(url, { headers: { Accept: 'application/json' }, signal });
     if (res.status === 429) {
-      const ra = Number(res.headers.get('retry-after')) * 1000;
-      throw new RateLimitError(Number.isFinite(ra) && ra > 0 ? ra : 2500 * Math.pow(2, attempt));
+      throw classify429(res, attempt);
     }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -130,7 +196,12 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
   try {
     return await task;
   } catch (err) {
-    if (attempt < 3 && (err instanceof RateLimitError || /HTTP 5\d\d/.test(String(err)))) {
+    // **额度耗尽绝不重试**：窗口级额度在分钟内不会恢复，重试只会
+    // 把一个失败变成 3 个失败（并且用户的 429 计数更难看）。
+    const retryable =
+      (err instanceof RateLimitError || /HTTP 5\d\d/.test(String(err))) &&
+      !(err instanceof QuotaExhaustedError);
+    if (attempt < 3 && retryable) {
       const wait = err instanceof RateLimitError ? err.retryAfterMs : 800 * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, Math.min(wait, 8000)));
       inflight.delete(url);
@@ -149,25 +220,63 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
 const CACHE_PREFIX = 'aetherglow:v3:';
 const CACHE_TTL_LIVE_MS = 18 * 60 * 1000; // 实时预报
 const CACHE_TTL_PAST_MS = 6 * 3600 * 1000;
+/**
+ * **过期缓存的保留上限**。
+ *
+ * 上一版 `cacheGet` 一过 TTL 就 `removeItem` 并返回 null —— 这看起来"干净"，
+ * 但代价极大：18 分钟一过缓存就被删掉，此时若碰上 429（额度耗尽 / 网络故障），
+ * `loadForecastBundle` 抛错、`store` 置 error、`prediction` 留在旧值但
+ * `status==='error'` 使整页卡片卸载 —— 用户从"有一份 20 分钟前的预报"
+ * 退化成"完全空白"。
+ *
+ * 现在的策略：**过期不等于不可用**。
+ *  · 新鲜（< ttl）      → 直接用，`stale: false`
+ *  · 过期但 < 24h       → 仍然返回，标注 `stale: true` + 数据年龄，
+ *                          由上层决定是"先展示再后台刷新"还是"仅在网络失败时用"
+ *  · 超过 24h           → 真的删掉（隔了一天的日落预报没有参考价值）
+ *
+ * 24h 的取法：天气预报本身 6 小时才更新一次，"一天前的同一时刻预报"
+ * 与今天的实际天气相关性已很低，再留着会误导。
+ */
+const CACHE_MAX_STALE_MS = 24 * 3600 * 1000;
 
 interface CacheEntry<T> {
   t: number;
   v: T;
 }
 
-function cacheGet<T>(key: string, ttl: number): T | null {
+/**
+ * 读取缓存。**过期条目不再立即删除**，而是通过 `stale` 标记上报，
+ * 让调用方在网络失败时仍能拿到"稍旧但可用"的数据。
+ *
+ * @returns 命中时返回值和新鲜度；未命中返回 null
+ */
+function cacheGetEntry<T>(
+  key: string,
+  ttl: number,
+): { value: T; stale: boolean; ageMs: number } | null {
   try {
     const raw = localStorage.getItem(CACHE_PREFIX + key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CacheEntry<T>;
-    if (Date.now() - parsed.t > ttl) {
+    if (!parsed || typeof parsed.t !== 'number') return null;
+    const ageMs = Date.now() - parsed.t;
+    // 超过保留上限：真的删掉
+    if (ageMs > CACHE_MAX_STALE_MS) {
       localStorage.removeItem(CACHE_PREFIX + key);
       return null;
     }
-    return parsed.v;
+    return { value: parsed.v, stale: ageMs > ttl, ageMs };
   } catch {
     return null;
   }
+}
+
+function cacheGet<T>(key: string, ttl: number): T | null {
+  const e = cacheGetEntry<T>(key, ttl);
+  // 只返回**新鲜**的条目 —— 保持原有 `cacheGet` 语义不变，
+  // 需要过期数据的调用方走 `cacheGetEntry`。
+  return e && !e.stale ? e.value : null;
 }
 
 function cacheSet<T>(key: string, value: T): void {
@@ -403,12 +512,8 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
       terrestrialRadiation: Math.max(0, num(series(hourly, 'terrestrial_radiation', model)[i])),
       cape: Math.max(0, num(series(hourly, 'cape', model)[i])),
-      windSpeed700: Math.max(0, num(series(hourly, 'wind_speed_700hPa', model)[i])),
-      windDir700: numOrNull(series(hourly, 'wind_direction_700hPa', model)[i]) ?? undefined,
       windSpeed500: Math.max(0, num(series(hourly, 'wind_speed_500hPa', model)[i])),
       windDir500: numOrNull(series(hourly, 'wind_direction_500hPa', model)[i]) ?? undefined,
-      windSpeed300: Math.max(0, num(series(hourly, 'wind_speed_300hPa', model)[i])),
-      windDir300: numOrNull(series(hourly, 'wind_direction_300hPa', model)[i]) ?? undefined,
       totalColumnWaterVapour: Math.max(0, numOrNull(series(hourly, 'total_column_integrated_water_vapour', model)[i]) ?? 0),
       cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
       cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
@@ -517,6 +622,18 @@ export interface LoadResult {
   tzOffsetSeconds: number;
   tzName: string;
   modelLabels: Record<ModelId, string>;
+  /**
+   * 本次结果是否来自**过期缓存**（网络/额度失败时的兜底）。
+   *
+   * 为 true 时 UI 必须显式告知用户「展示的是 X 分钟前的数据」以及
+   * 失败原因 —— 否则用户会把几十分钟前的旧预报当成实时数据，
+   * 这在日落前 20 分钟的场景里是危险的误导。
+   */
+  stale?: boolean;
+  /** 过期数据的年龄 (ms) */
+  staleAgeMs?: number;
+  /** 为什么回退到过期数据（原始错误信息） */
+  staleReason?: string;
 }
 
 export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult> {
@@ -555,22 +672,54 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
   const isPast = Date.parse(`${dateISO}T00:00:00Z`) < Date.now() - 86400000;
   const ttl = isPast ? CACHE_TTL_PAST_MS : CACHE_TTL_LIVE_MS;
 
-  const cached = force ? null : cacheGet<CachedBundle>(cacheKey, ttl);
-  if (cached) {
-    return hydrate(cached, ringPoints, grid, models, resolved, true);
+  // 新鲜缓存：直接用
+  const fresh = force ? null : cacheGet<CachedBundle>(cacheKey, ttl);
+  if (fresh) {
+    return hydrate(fresh, ringPoints, grid, models, resolved, true);
   }
 
+  // 过期但仍在保留期内：先记下来，网络失败时兜底
+  const staleEntry = cacheGetEntry<CachedBundle>(cacheKey, ttl);
+
   const signal = opts.signal;
-  const [fcRaw, aqRaw, elRaw] = await Promise.all([
-    fetchJson<OmPointResponse | OmPointResponse[]>(forecastUrl(ringPoints, models, startDate, endDate), 0, signal).catch(
-      (e) => {
-        if (signal?.aborted) throw e;
-        throw new Error(`气象场请求失败：${(e as Error).message}`);
-      },
-    ),
-    fetchJson<OmPointResponse | OmPointResponse[]>(airUrl(ringPoints, startDate, endDate), 0, signal).catch(() => null),
-    fetchJson<{ elevation: number[] }>(elevUrl(ringPoints), 0, signal).catch(() => null),
-  ]);
+  let fcRaw: OmPointResponse | OmPointResponse[];
+  let aqRaw: OmPointResponse | OmPointResponse[] | null;
+  let elRaw: { elevation: number[] } | null;
+  try {
+    [fcRaw, aqRaw, elRaw] = await Promise.all([
+      fetchJson<OmPointResponse | OmPointResponse[]>(forecastUrl(ringPoints, models, startDate, endDate), 0, signal).catch(
+        (e) => {
+          if (signal?.aborted) throw e;
+          // 额度耗尽要把原文透传（它的 message 已经写清楚了），
+          // 其他错误加上"气象场请求失败"前缀便于定位
+          if (e instanceof QuotaExhaustedError) throw e;
+          throw new Error(`气象场请求失败：${(e as Error).message}`);
+        },
+      ),
+      fetchJson<OmPointResponse | OmPointResponse[]>(airUrl(ringPoints, startDate, endDate), 0, signal).catch(() => null),
+      fetchJson<{ elevation: number[] }>(elevUrl(ringPoints), 0, signal).catch(() => null),
+    ]);
+  } catch (err) {
+    // ── 网络/额度失败时的过期缓存兜底 ──
+    //
+    // 这是「整页空白」与「显示稍旧的数据 + 明确提示」之间的差别。
+    // 宁可给用户一份 40 分钟前的预报并标注数据年龄，也不要给他一片黑屏 ——
+    // 尤其当日落只剩 20 分钟的时候。
+    if (signal?.aborted) throw err;
+    if (staleEntry) {
+      const ageMin = Math.round(staleEntry.ageMs / 60000);
+      console.warn(
+        `[aetherglow] 网络请求失败，回退到 ${ageMin} 分钟前的缓存数据：`,
+        (err as Error).message,
+      );
+      return hydrate(staleEntry.value, ringPoints, grid, models, resolved, true, {
+        stale: true,
+        staleAgeMs: staleEntry.ageMs,
+        staleReason: (err as Error).message,
+      });
+    }
+    throw err;
+  }
 
   // 请求返回后若已被取消，丢弃结果（不写缓存、不覆盖新结果）
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -756,6 +905,7 @@ function hydrate(
   models: ModelId[],
   _resolved: ResolvedEvent,
   cached: boolean,
+  stale?: { stale: boolean; staleAgeMs: number; staleReason: string },
 ): LoadResult {
   const modelDatasets = {} as Record<ModelId, ModelDataset>;
   for (const m of models) {
@@ -819,6 +969,9 @@ function hydrate(
     tzOffsetSeconds: payload.tzOffsetSeconds,
     tzName: payload.tzName,
     modelLabels: Object.fromEntries(models.map((m) => [m, MODEL_META[m].label])) as Record<ModelId, string>,
+    stale: stale?.stale,
+    staleAgeMs: stale?.staleAgeMs,
+    staleReason: stale?.staleReason,
   };
 }
 

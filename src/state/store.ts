@@ -5,7 +5,7 @@
 import { create } from 'zustand';
 import { predictSunset } from '../engine/SunsetPhysicsEngine';
 import type { ModelId, SunMode, SunsetPredictionOutput, GeoPoint, ForecastBundle } from '../engine/types';
-import { loadForecastBundle, resolveEvent, type ResolvedEvent } from '../data/openMeteo';
+import { loadForecastBundle, resolveEvent, QuotaExhaustedError, type ResolvedEvent } from '../data/openMeteo';
 import { fetchEnsembleProbability } from '../data/ensemble';
 import { fetchOzoneColumn } from '../data/ozone';
 import { sunPosition } from '../engine/astro';
@@ -35,6 +35,18 @@ interface Store {
   prediction: SunsetPredictionOutput | null;
   lastLoadedAt: number | null;
   fromCache: boolean;
+  /**
+   * 当前展示的数据是否为**过期缓存**（网络/额度失败时的兜底）。
+   *
+   * 与 `status==='error'` 互斥：有过期数据时 `status` 仍是 `'ready'`
+   * （页面正常渲染），但 `stale` 为 true，UI 需要显式提示数据年龄。
+   * 这样「额度耗尽」不会让整页变空白。
+   */
+  stale: boolean;
+  staleAgeMs: number;
+  staleReason: string | null;
+  /** 额度恢复时刻 (epoch ms)；0 = 非额度问题 */
+  quotaResetAtMs: number;
   /** 臭氧总柱量 (DU)，来自 NASA POWER；null = 用标准 300 DU */
   ozoneDu: number | null;
 
@@ -88,6 +100,10 @@ export const useStore = create<Store>((set, get) => ({
   prediction: null,
   lastLoadedAt: null,
   fromCache: false,
+  stale: false,
+  staleAgeMs: 0,
+  staleReason: null,
+  quotaResetAtMs: 0,
   ozoneDu: null,
 
   scrubMin: 0,
@@ -154,6 +170,26 @@ export const useStore = create<Store>((set, get) => ({
     const ac = new AbortController();
     inflightAbort = ac;
 
+    // ── 额度冷却：额度耗尽后拒绝新请求 ──
+    //
+    // 上一版点「重试」会立刻再发一次请求，而额度是**小时窗口**级的 ——
+    // 分钟内重试必然还是 429。用户看到红色横幅后通常会连点几次，
+    // 结果是把自己的 429 计数刷得更高、日志更难看，还拖慢了真正的恢复。
+    //
+    // 现在：一旦确认额度耗尽并把 `quotaResetAtMs` 记下来，在恢复前
+    // 直接短路返回（保留现有数据与错误提示，不发请求）。
+    const cooldownUntil = get().quotaResetAtMs;
+    if (cooldownUntil > 0 && Date.now() < cooldownUntil) {
+      const mins = Math.ceil((cooldownUntil - Date.now()) / 60000);
+      set((s) => ({
+        status: s.prediction ? 'ready' : 'error',
+        error: s.prediction
+          ? null
+          : `Open-Meteo 额度预计 ${mins} 分钟后恢复，暂不重复请求。`,
+      }));
+      return;
+    }
+
     set({ status: 'loading', error: null });
     try {
       const res = await loadForecastBundle({
@@ -173,12 +209,34 @@ export const useStore = create<Store>((set, get) => ({
         status: 'ready',
         lastLoadedAt: Date.now(),
         fromCache: res.bundle.cached,
+        // 过期缓存兜底：status 仍是 ready（页面正常渲染），
+        // 但要把"数据是旧的"这个事实明确传出去
+        stale: res.stale === true,
+        staleAgeMs: res.staleAgeMs ?? 0,
+        staleReason: res.staleReason ?? null,
+        quotaResetAtMs: 0,
       });
       get().recompute();
     } catch (e) {
       // 被后续请求取消的旧请求：静默丢弃，不要把 stale error 显示给用户
       if (mySeq !== loadSeq || (e as Error).name === 'AbortError') return;
-      set({ status: 'error', error: (e as Error).message });
+
+      // 额度耗尽：单独记录恢复时刻，供 UI 显示倒计时并禁用重试。
+      // 不要把它和普通网络错误混为一谈 —— 用户狂点重试只会继续吃 429。
+      const resetAtMs = e instanceof QuotaExhaustedError ? e.resetAtMs : 0;
+
+      // **关键：不清空已有数据**。如果之前已经成功加载过一份 bundle，
+      // 保留它（predictions 也保留），只在顶部显示错误。
+      // 上一版这里直接 set({status:'error'})，而 App 用 `p` 决定渲染哪些卡片 ——
+      // 于是额度一耗尽，整个页面从"有一份预报"变成"完全空白"。
+      set((s) => ({
+        status: 'error',
+        error: (e as Error).message,
+        quotaResetAtMs: resetAtMs,
+        // 已有数据时保留；没有数据时保持 null（真的没东西可显示）
+        bundle: s.bundle,
+        prediction: s.prediction,
+      }));
     }
   },
 
