@@ -1464,6 +1464,11 @@ function evaluateSnapshot(
   ozoneMeasured = false,
   /** 视线方位（太阳方位角）—— 启用云量的半拉格朗日平流修正 */
   sightAzimuthDeg?: number,
+  /**
+   * 整场 COT 标定乘子（由 `predictSunset` 在日落前太阳较高时刻算一次）。
+   * 提供时直接复用，不再逐帧反演 —— 见函数内 COT 段的长注释。
+   */
+  cotFactorOverride?: number,
 ): Snapshot {
   const profile = parseVerticalCloudProfile(bundle, model, timeMs, observerMslM, sightAzimuthDeg);
   const aer = sampleAerosol(bundle, model, timeMs);
@@ -1492,16 +1497,28 @@ function evaluateSnapshot(
 
   // ── 云光学厚度反演（COT）──
   //
-  // 用当前帧近场环的 SW/TOA 反演**云的**整层有效 τ，再与静态 LWP 表
-  // 算出的 τ 相比得到中性乘子。它补上了「只有云覆盖率、没有云厚薄」
-  // 这个此前的最大缺口：覆盖率相同的「薄纱卷云」与「厚重层云」
-  // 现在会得到不同的消光。
+  // 补上「只有云覆盖率、没有云厚薄」这个此前的最大缺口：
+  // 覆盖率相同的「薄纱卷云」与「厚重层云」会得到不同的消光。
   //
-  // **必须剥离晴空基线**：SW/TOA 里含大气本底（Rayleigh + 气溶胶 + 水汽），
-  // 直接当云透射率会让晴空也反演出 τ≈12 —— 这一点在真实数据上实测确认过
-  // （T=0.515、云量 0% 却给出 τ=12.5），所以用带 `clearSkySwTransmittance`
-  // 的版本，而不是裸的 `inferCloudOpticalDepth`。
+  // **关键设计：整场标定一次，不是逐帧算**（2026-11 第二次修正）
+  //
+  // 第一版逐帧反演，真实数据上崩了：太阳 5.1° 时模式给 T_obs=0.128，
+  // 而晴空基线算 T_clear=0.163 —— 比值 0.78 被误读成"薄云"，反算 τ=3.7，
+  // 而同帧静态表 τ=27（云量很大），差 7 倍。于是 cotFactor 被压到
+  // 0.45 下限，把最关键时段的云消光砍掉 55%。
+  //
+  // 第二版加 15° 硬门槛，结果更糟：整条时间轴（-20~+40min）太阳高度角
+  // 最大只有 4.9°，cotFactor 恒为 1.0 —— **功能完全死了**。
+  //
+  // 现在的做法：反演只回答「这一天头顶的云整体偏厚还是偏薄」，
+  // 那是**天气尺度**的量，一个黄昏内基本不变。所以由调用方在日落前
+  // 太阳足够高的参考时刻算一次（见 predictSunset 的 calibrateCot），
+  // 通过 `cotFactorOverride` 传入整条时间轴复用。
+  // 只有调用方没提供时，才尝试用当前帧（并受 15° 门槛约束）。
   const cotFactor = (() => {
+    if (cotFactorOverride != null && Number.isFinite(cotFactorOverride)) {
+      return clamp(cotFactorOverride, 0.6, 1.9);
+    }
     const tauObs = inferCloudOpticalDepthFromRadiation(
       profile.local.shortwaveRadiation,
       profile.local.terrestrialRadiation,
@@ -2087,13 +2104,44 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   const cloudWallClosed = primaryWall.closed;
   const bestIllum = primaryWall.bestIllum;
 
+  // ── 整场 COT 标定（一次）──
+  //
+  // 「这一天头顶的云整体偏厚还是偏薄」是天气尺度的量，一个黄昏内基本不变。
+  // 但它只能在太阳够高时反演（SW/TOA 比值在低角下不可用，实测差 7 倍）。
+  //
+  // 所以策略是：在**日落前的参考时刻**（事件前 90 分钟，此时 α 通常 10–20°）
+  // 反演一次，把结果作为整条时间轴的乘子。
+  //   · 若参考时刻 α 仍 < 15°（高纬冬季），退回中性 1.0 并放弃 COT
+  //   · 绝不逐帧反演 —— 那会让临界帧拿到错 7 倍的乘子
+  const cotFactorGlobal = (() => {
+    const refMs = eventMs - 90 * 60000;
+    const refAlt = sunPosition(refMs, point.lat, point.lon).altitude;
+    if (refAlt < 15) return 1;
+    const refProfile = parseVerticalCloudProfile(bundle, primaryModel, refMs, observerMslM);
+    const refAer = sampleAerosol(bundle, primaryModel, refMs);
+    const tauObs = inferCloudOpticalDepthFromRadiation(
+      refProfile.local.shortwaveRadiation,
+      refProfile.local.terrestrialRadiation,
+      refAlt,
+      refAer.aod,
+    );
+    if (tauObs == null) return 1;
+    let tauStatic = 0;
+    for (const k of LEVEL_KEYS) {
+      if (refProfile.local.cover[k] > 0.02) {
+        tauStatic += levelFullOpticalDepth(k) * refProfile.local.cover[k];
+      }
+    }
+    return cotCalibrationFactor(tauObs, tauStatic);
+  })();
+
   // ── 时序评分 ──
   const series: TimeSample[] = [];
   const snapshots: Snapshot[] = [];
   for (const s of grid.samples) {
     // cloudSea 现在由 evaluateSnapshot 按当前帧自己判定（逐帧），
     // 不再由调用方用 eventMs 那一刻的剖面固定传入。
-    const snap = evaluateSnapshot(bundle, primaryModel, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu, ozoneMeasured, s.azimuthDeg);
+    const snap = evaluateSnapshot(bundle, primaryModel, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu, ozoneMeasured, s.azimuthDeg, cotFactorGlobal);
     snapshots.push(snap);
     const g = snap.guards;
     const v = vividnessOf(snap, s.stage, {
@@ -2429,7 +2477,7 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   // 的设计意图正是让用户点击主源来对比 —— 这个功能因此自相矛盾。
   const modelPeaks = compare.map((m) => {
     const vals = grid.samples.map((s) => {
-      const snap = evaluateSnapshot(bundle, m, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu, ozoneMeasured, s.azimuthDeg);
+      const snap = evaluateSnapshot(bundle, m, terrainM, s.timeMs, s.altitudeDeg, observerMslM, ozoneDu, ozoneMeasured, s.azimuthDeg, cotFactorGlobal);
       const g = snap.guards;
       return vividnessOf(snap, s.stage, {
         lowLock: g.lowLock,

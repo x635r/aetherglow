@@ -1175,11 +1175,25 @@ export function clearSkySwTransmittance(sunAltitudeDeg: number, aod: number): nu
  * 所以结果只反映云的贡献。物理上必须这样 —— 否则晴空也会被算出
  * 十几的光学厚度（大气本底被误当云）。
  *
+ * **太阳高度角下限 15°（实测确定的硬门槛）**：
+ * 低太阳角时 SW/TOA 比值不可用，原因是双向的 ——
+ *  ① 分母 TOA 趋 0，比值数值不稳定
+ *  ② 更致命的是**晴空基线与模式的低角行为不匹配**：实测太阳 5.1°、AOD 0.5 时
+ *     模式给 T_obs=0.128，而 `clearSkySwTransmittance` 给 T_clear=0.163，
+ *     两者本该接近（晴空）却被比值放大成 T_cloud=0.78 → 反算出 τ=3.7，
+ *     而同一帧静态表的 τ=27（云量很大）—— 差 7 倍，方向完全相反。
+ *     实测后果：黄昏临界帧的 cotFactor 被压到 0.45 下限，
+ *     把本该最亮时段的云消光砍掉 55%。
+ *  ③ 这个时段恰好是日落前 30 分钟 —— 最关键的预报窗口
+ *
+ * 所以反演只在 α ≥ 15° 时启用。宁可整场不做 COT 修正（factor=1，
+ * 退回气候态 LWP 表），也不要在关键时刻用一个错 7 倍的乘子。
+ *
  * @param shortwaveW     地面短波总辐射 W/m²
  * @param toaW           大气顶短波辐照 W/m²
- * @param sunAltitudeDeg 太阳高度角（度），用于算晴空基线
+ * @param sunAltitudeDeg 太阳高度角（度），用于算晴空基线并做可行性门槛
  * @param aod            550nm AOD，用于算晴空基线
- * @returns 云的等效 τ；输入不可用或晴空时返回 null
+ * @returns 云的等效 τ；输入不可用、太阳太低、或晴空时返回 null
  */
 export function inferCloudOpticalDepthFromRadiation(
   shortwaveW: number | undefined,
@@ -1187,10 +1201,13 @@ export function inferCloudOpticalDepthFromRadiation(
   sunAltitudeDeg: number,
   aod: number,
 ): number | null {
+  // **低太阳角一律不反演**（见上面的 ①②③）
+  if (!Number.isFinite(sunAltitudeDeg) || sunAltitudeDeg < COT_MIN_SUN_ALT_DEG) return null;
+
   const tau = inferCloudOpticalDepth(shortwaveW, toaW);
   if (tau == null) return null;
   const tClear = clearSkySwTransmittance(sunAltitudeDeg, aod);
-  // 晴空基线为 1（太阳太低）时无法剥离，跳过
+  // 晴空基线为 1（不该发生，因为上面已卡 15°）时无法剥离，跳过
   if (tClear >= 0.999) return null;
   // 云透射率 = 观测比值 / 晴空基线。>1 说明观测比晴空还亮
   // （反射云 + 雪面 / 模式不一致），此时不可信。
@@ -1200,6 +1217,15 @@ export function inferCloudOpticalDepthFromRadiation(
   const B = 0.075;
   return clamp((1 / Math.max(Tcloud, 0.02) - 1) / B, 0, 60);
 }
+
+/**
+ * COT 反演要求的最低太阳高度角。
+ *
+ * 15° 的依据：实测 5.1° 时晴空基线与模式比值偏差达 27%（0.163 vs 0.128），
+ * 反算出的 τ 与静态表差 7 倍；而 10.8° 时（τ_obs=28.7 vs τ_static=26.8）
+ * 两者相差仅 7%，反演可信。15° 在这两者之间，留了余量。
+ */
+export const COT_MIN_SUN_ALT_DEG = 15;
 
 export function inferCloudOpticalDepth(
   shortwaveW: number | undefined,
@@ -1223,23 +1249,31 @@ export function inferCloudOpticalDepth(
 /**
  * 把反演的 τ_obs 转成「静态 LWP 表」的乘子。
  *
- * 关键设计：**乘子围绕 1 中性，且有界 [0.45, 2.6]**。
- *  · 上界 2.6：反演偏高时不能把卷云放大成浓积云（那会把好天气判成无烧）
- *  · 下界 0.45：反演偏低时不能把层云缩小成薄纱（那会把阴天判成大烧）
+ * **围绕 1 中性，且有界 [0.6, 1.9]**（2026-11 收紧）。
  *
- * 只有当反演值与静态表**同量级**时才采信 —— 若相差超过一个量级，
- * 更可能是反演本身失效（地表反照率高的雪面、沙尘、低太阳角），
- * 此时退回中性 1.0 而不是硬拉。
+ * 上一版是 [0.45, 2.6]，实测发现两个问题：
+ *  ① 下界 0.45 会在"反演偏低"时把云消光直接砍掉 55%，
+ *     而偏低往往正是反演失效的表现（低太阳角、高地表反照率），
+ *     不该让失效信号造成这么大影响
+ *  ② 采信区间 0.1–10 太宽 —— 实测出现过 τ_obs/τ_static = 0.20
+ *     （5.5 vs 27.2）仍被采信、压到下限 0.45 的情况
+ *
+ * 现在采信区间收紧到 **0.4–2.5**：超出即为"反演与静态表严重矛盾"，
+ * 更可能是反演本身失效（雪面反射、模式 SW 与云量不一致、低角误差），
+ * 此时退回中性 1.0 —— 保持气候态 LWP 表的行为，不做有害修正。
+ *
+ * 幂次从 0.6 提到 0.5：进一步压制乘子的幅度，让 COT 只做"温和的
+ * 相对厚薄修正"，而不是主导消光。
  *
  * @param tauObs        反演得到的整层 τ
  * @param tauStaticSum  当前剖面按静态表算出的整层 τ（各层 τ_full 之和）
- * @returns 0.45~2.6 的乘子
+ * @returns 0.6~1.9 的乘子
  */
 export function cotCalibrationFactor(tauObs: number | null, tauStaticSum: number): number {
   if (tauObs == null || !Number.isFinite(tauObs)) return 1;
   if (!Number.isFinite(tauStaticSum) || tauStaticSum <= 0.1) return 1;
   const ratio = tauObs / tauStaticSum;
-  // 相差一个量级以上 → 反演不可信，不采信
-  if (ratio > 10 || ratio < 0.1) return 1;
-  return clamp(Math.pow(ratio, 0.6), 0.45, 2.6);
+  // 与静态表严重矛盾 → 反演不可信，不采信
+  if (ratio > 2.5 || ratio < 0.4) return 1;
+  return clamp(Math.pow(ratio, 0.5), 0.6, 1.9);
 }

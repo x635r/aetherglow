@@ -1136,18 +1136,24 @@ describe('COT 反演：从 SW/TOA 得到真实云厚', () => {
     expect(cotCalibrationFactor(6, 6)).toBeCloseTo(1, 6);
   });
 
-  it('乘子有界，且方向正确', () => {
-    expect(cotCalibrationFactor(20, 5)).toBeGreaterThan(1);
-    expect(cotCalibrationFactor(1, 5)).toBeLessThan(1);
-    expect(cotCalibrationFactor(1000, 5)).toBeLessThanOrEqual(2.6);
-    expect(cotCalibrationFactor(0.01, 5)).toBeGreaterThanOrEqual(0.45);
+  it('乘子有界，且方向正确（采信区间 0.4~2.5）', () => {
+    // 比值 2.0（在采信区间内）→ 乘子 > 1
+    expect(cotCalibrationFactor(10, 5)).toBeGreaterThan(1);
+    // 比值 0.5（在采信区间内）→ 乘子 < 1
+    expect(cotCalibrationFactor(2.5, 5)).toBeLessThan(1);
+    // 乘子上下界收紧到 [0.6, 1.9]
+    expect(cotCalibrationFactor(12, 5)).toBeLessThanOrEqual(1.9);
+    expect(cotCalibrationFactor(2.1, 5)).toBeGreaterThanOrEqual(0.6);
   });
 
-  it('相差一个量级以上时判定反演失效，退回中性', () => {
-    // 反演 60、静态 2 → 比值 30 > 10，不可信
+  it('与静态表严重矛盾时判定反演失效，退回中性（比值 >2.5 或 <0.4）', () => {
+    // 反演 60、静态 2 → 比值 30，不可信
     expect(cotCalibrationFactor(60, 2)).toBe(1);
-    // 反演 0.1、静态 10 → 比值 0.01 < 0.1，不可信
+    // 反演 0.1、静态 10 → 比值 0.01，不可信
     expect(cotCalibrationFactor(0.1, 10)).toBe(1);
+    // **实测踩过的坑**：τ_obs=5.5 vs τ_static=27.2 → 比值 0.20。
+    // 旧版采信并压到下限 0.45，把云消光砍掉 55%；现在直接退回中性。
+    expect(cotCalibrationFactor(5.5, 27.2)).toBe(1);
   });
 
   it('无可用反演时乘子为 1（不改变任何行为）', () => {
@@ -1155,12 +1161,12 @@ describe('COT 反演：从 SW/TOA 得到真实云厚', () => {
     expect(cotCalibrationFactor(NaN, 8)).toBe(1);
   });
 
-  it('薄卷云 vs 厚层云：同样 70% 覆盖率应给出不同消光', () => {
-    // 静态表下两层 τ_full 相近（8 vs 18），但真实 COT 差 10 倍
-    const thin = cotCalibrationFactor(2, 8);
-    const thick = cotCalibrationFactor(40, 8);
+  it('薄卷云 vs 厚层云：采信区间内应给出不同消光', () => {
+    // 静态 τ=8。薄卷云真实 τ 可低到 4（比值 0.5），厚层云高到 16（比值 2.0）
+    const thin = cotCalibrationFactor(4, 8);
+    const thick = cotCalibrationFactor(16, 8);
     expect(thick).toBeGreaterThan(thin);
-    expect(thick / thin).toBeGreaterThan(3);
+    expect(thick / thin).toBeGreaterThan(1.5);
   });
 });
 
@@ -1434,5 +1440,42 @@ describe('额度耗尽时的降级行为', () => {
     expect(e.message).toContain('额度');
     expect(Number.isFinite(e.resetAtMs)).toBe(true);
     expect(e.resetAtMs).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 24. COT 反演必须是「整场一次」，不能在低太阳角逐帧算
+// ═══════════════════════════════════════════════════════════════════════
+describe('COT 反演的时间尺度（两次返工后的最终设计）', () => {
+  it('太阳低于 15° 一律不反演（实测差 7 倍的成因）', () => {
+    // 实测：太阳 5.1°、AOD 0.5 时模式 T=0.128，晴空基线 T_clear=0.163，
+    // 比值 0.78 被误读成"薄云"，反算 τ=3.7 —— 而同帧静态表 τ=27。
+    const tau = inferCloudOpticalDepthFromRadiation(33, 258, 5.1, 0.5);
+    expect(tau).toBeNull();
+    // 14.9° 仍拒绝
+    expect(inferCloudOpticalDepthFromRadiation(300, 800, 14.9, 0.2)).toBeNull();
+  });
+
+  it('太阳足够高时正常反演', () => {
+    const tClear = clearSkySwTransmittance(30, 0.2);
+    const toaW = 800;
+    // 地面辐射只有晴空预期的一半 → 有云
+    const tau = inferCloudOpticalDepthFromRadiation(toaW * tClear * 0.5, toaW, 30, 0.2);
+    expect(tau).not.toBeNull();
+    expect(tau!).toBeGreaterThan(3);
+  });
+
+  it('乘子采信区间收紧后，实测踩过的 0.20 比值被拒绝', () => {
+    // τ_obs=5.5 / τ_static=27.2 = 0.20 —— 旧版采信并压到 0.45 下限，
+    // 把云消光砍掉 55%；现在直接退回中性 1.0
+    expect(cotCalibrationFactor(5.5, 27.2)).toBe(1);
+  });
+
+  it('乘子上下界收紧到 [0.6, 1.9]，不再有 0.45 这种大幅削光', () => {
+    for (const r of [0.4, 0.6, 1.0, 1.5, 2.5]) {
+      const f = cotCalibrationFactor(r * 10, 10);
+      expect(f).toBeGreaterThanOrEqual(0.6);
+      expect(f).toBeLessThanOrEqual(1.9);
+    }
   });
 });
