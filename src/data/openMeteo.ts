@@ -71,6 +71,24 @@ const HOURLY_VARS = [
   'direct_radiation',
   'diffuse_radiation',
   'total_column_integrated_water_vapour',
+  // ── 2026-11 算法升级：云光学厚度反演所需 ──
+  //
+  // `terrestrial_radiation` = **大气顶**短波辐照（按太阳位置算，不含
+  // 云/气溶胶）。与地面 `shortwave_radiation` 相除就是整层短波透射率，
+  // 这是**唯一**能免费拿到真实云光学厚度（COT）的途径 ——
+  // 而 COT 正是本引擎此前最大的数据缺口（只能靠气候态 LWP 猜）。
+  'shortwave_radiation',
+  'terrestrial_radiation',
+  // 深对流识别：CAPE 高 + 强降水 = 积雨云黑幕，不该当画布
+  'cape',
+  // ── 高空风场：用于半拉格朗日平流插值（峰值时刻与云洞位置的相位修正）──
+  // 实测 ECMWF 全层非空（700/500/300hPa 速度与风向均 24/24）
+  'wind_speed_700hPa',
+  'wind_direction_700hPa',
+  'wind_speed_500hPa',
+  'wind_direction_500hPa',
+  'wind_speed_300hPa',
+  'wind_direction_300hPa',
 ];
 
 const AIR_VARS = ['aerosol_optical_depth', 'dust', 'pm2_5', 'pm10', 'relative_humidity_2m'];
@@ -228,17 +246,26 @@ export function resolveEvent(point: GeoPoint, dateISO: string, mode: 'sunrise' |
     new Date(ms + offset * 1000).toISOString().slice(0, 10);
 
   const onDay = candidates.find((ms) => localDateOf(ms) === dateISO);
-  // 极昼/极夜兜底：没有符合日期的事件时，取窗口内最接近正午的那个。
-  // 注意必须把 `exists` 上报出去 —— 否则 UI 会拿一个「太阳在地平线下 23°」的
-  // 时刻当成正常日落，给出一份看起来很正常的"无烧"预报，把极夜误读成坏天气。
+  // 极昼/极夜兜底：没有符合日期的事件时，取窗口内**离目标本地正午最近**的那个。
+  //
+  // 上一版写的是
+  //     |localDateOf(ms).localeCompare(dateISO)| < |localDateOf(best).localeCompare(dateISO)|
+  // `localeCompare` 只返回 −1/0/1，取绝对值后恒为 1（相等时为 0），
+  // 于是比较退化成"只在完全相等时才换"，`reduce` 实际上永远选第一个候选 ——
+  // 极夜下可能选到一个比正确时刻早 12 小时以上的事件。
+  //
+  // 正确做法：比较**时间距离**，而不是字符串比较的结果。
+  const dayStartMs = localMidnightUtc;
+  const dayEndMs = localMidnightUtc + 24 * 3600 * 1000;
+  const localNoonUtc = (dayStartMs + dayEndMs) / 2;
+  // `exists` 必须如实上报：极夜时应为 false，UI 靠它显示极夜横幅，
+  // 而不是把"太阳在地平线下 23°"当成一次正常日落报"无烧"。
   const exists = onDay !== undefined;
   const eventMs =
     onDay ??
     (candidates.length
       ? candidates.reduce((best, ms) =>
-          Math.abs(localDateOf(ms).localeCompare(dateISO)) < Math.abs(localDateOf(best).localeCompare(dateISO))
-            ? ms
-            : best,
+          Math.abs(ms - localNoonUtc) < Math.abs(best - localNoonUtc) ? ms : best,
         )
       : localMidnightUtc + (mode === 'sunrise' ? 6 : 18) * 3600 * 1000);
 
@@ -373,6 +400,15 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       freezingLevelM: Math.max(0, numOrNull(series(hourly, 'freezing_level_height', model)[i]) ?? 0),
       directRadiation: Math.max(0, num(series(hourly, 'direct_radiation', model)[i])),
       diffuseRadiation: Math.max(0, num(series(hourly, 'diffuse_radiation', model)[i])),
+      shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
+      terrestrialRadiation: Math.max(0, num(series(hourly, 'terrestrial_radiation', model)[i])),
+      cape: Math.max(0, num(series(hourly, 'cape', model)[i])),
+      windSpeed700: Math.max(0, num(series(hourly, 'wind_speed_700hPa', model)[i])),
+      windDir700: numOrNull(series(hourly, 'wind_direction_700hPa', model)[i]) ?? undefined,
+      windSpeed500: Math.max(0, num(series(hourly, 'wind_speed_500hPa', model)[i])),
+      windDir500: numOrNull(series(hourly, 'wind_direction_500hPa', model)[i]) ?? undefined,
+      windSpeed300: Math.max(0, num(series(hourly, 'wind_speed_300hPa', model)[i])),
+      windDir300: numOrNull(series(hourly, 'wind_direction_300hPa', model)[i]) ?? undefined,
       totalColumnWaterVapour: Math.max(0, numOrNull(series(hourly, 'total_column_integrated_water_vapour', model)[i]) ?? 0),
       cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
       cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
@@ -553,6 +589,9 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
     elevationM: Math.max(0, num(elevations[i])),
   }));
   const localElevationM = terrain[0].elevationM;
+  // 地形是否真实可用：看 API 是否返回了 elevation 数组。
+  // **不能用 `some(e > 0)`** —— 沿海城市地面恰为 0m，会被误判为缺测。
+  const terrainAvailable = elRaw != null && Array.isArray(elRaw.elevation) && elRaw.elevation.length > 0;
 
   const ringSeries: Record<ModelId, RingSeries[]> = {} as Record<ModelId, RingSeries[]>;
   const ringAerosol: Record<ModelId, RingAerosol[]> = {} as Record<ModelId, RingAerosol[]>;
@@ -578,7 +617,9 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
       return {
         ringKm: RING_KM[i],
         point: p,
-        samples: resp ? buildAerosol(resp.hourly, offsetOf(resp) || tzOffsetSeconds) : [],
+        // `||` 会把合法的 0（伦敦/UTC+0）当成 falsy 而回退到调用方的偏移，
+        // 在两个偏移不同时（例如观测点 UTC+1、环跨到 UTC+0）产生整小时错位。
+        samples: resp ? buildAerosol(resp.hourly, offsetOf(resp)) : [],
       };
     });
   }
@@ -589,6 +630,9 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
     tzName,
     localElevationM,
     terrain,
+    terrainAvailable,
+    // 位势高度是否有真实值：任一时次任一层拿到了 geopotential_height
+    gphAvailable: hasRealGph(fc),
     gridLat: fc[0]?.latitude ?? point.lat,
     gridLon: fc[0]?.longitude ?? point.lon,
     rings: ringPoints.map((p, i) => ({
@@ -625,10 +669,40 @@ interface CachedBundle {
   tzName: string;
   localElevationM: number;
   terrain: TerrainSample[];
+  /** 地形数据是否真实可用（0m 沿海城市也算可用） */
+  terrainAvailable?: boolean;
+  /** 位势高度是否为真实模式值 */
+  gphAvailable?: boolean;
   gridLat: number;
   gridLon: number;
   rings: CachedRing[];
   apiCalls: number;
+}
+
+/**
+ * 检查响应里是否真的有位势高度序列。
+ *
+ * 逐层任一模型任一时刻非空即算可用 —— 因为引擎实际取的是"主模型 + 交叉校验"，
+ * 只要数据源在某处提供了真实值，就不该按"退回标称值"处理（那会白扣 18% 置信度）。
+ * 旧的 `|h − nominal| > 1` 判据会把恰好接近标准大气的真实探空判成缺测。
+ */
+function hasRealGph(responses: Array<OmPointResponse | undefined>): boolean {
+  // **注意键名带模型后缀**：多模型请求返回的是
+  //   `geopotential_height_500hPa_ecmwf_ifs025`
+  // 不是裸的 `geopotential_height_500hPa`。只查裸键名会永远找不到 ——
+  // 这正是上一版一直报 `gphAvailable: false` 的根因（白扣 18% 置信度）。
+  // 所以这里按前缀匹配任何 geopotential_height_* 键。
+  for (const resp of responses) {
+    if (!resp?.hourly) continue;
+    const hourly = resp.hourly as unknown as Record<string, Array<number | null> | string[]>;
+    for (const key of Object.keys(hourly)) {
+      if (!key.startsWith('geopotential_height_')) continue;
+      const arr = hourly[key];
+      if (!Array.isArray(arr)) continue;
+      if (arr.some((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -736,6 +810,8 @@ function hydrate(
     fetchedAt: payload.fetchedAt,
     apiCalls: payload.apiCalls,
     cached,
+    terrainAvailable: payload.terrainAvailable,
+    gphAvailable: payload.gphAvailable,
   };
 
   return {

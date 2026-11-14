@@ -25,7 +25,7 @@
 import { clamp } from '../engine/astro';
 import { LEVEL_BY_KEY, RING_KM, TIMELINE_START_MIN, TIMELINE_END_MIN } from '../engine/constants';
 import type { LevelKey } from '../engine/constants';
-import { cloudLitFactor } from '../engine/optics';
+import { CLOUD_OVERLAP_DECORR_KM, cloudLitFactor } from '../engine/optics';
 import type { SunMode } from '../engine/types';
 
 const ENSEMBLE_BASE = 'https://ensemble-api.open-meteo.com/v1/ensemble';
@@ -221,11 +221,19 @@ function memberScore(
   const sGolden = deckQuality(golden, 'golden') * litGolden;
   const sHigh = deckQuality(high, 'high') * litHigh;
 
-  // 角色并集（两个黄金层、两个高云层合并为同一角色内的并集）
-  const union = (a: number, b: number) => 1 - (1 - a) * (1 - b);
+  // 角色内指数-随机重叠（与主引擎 `combinedCloudCover` 同源）
+  //
+  // 上一版用 `1 − Π(1−s)`（独立并集），等价于假设同角色各层完全随机重叠。
+  // 但黄金层的 600/500 只差 1.3km、高云四层差 1.2–2.6km，都接近
+  // 去相关长度 L_cf≈1.43km，真实重叠度远高于随机 —— 独立并集会高估
+  // 发光面积，进而让集合概率虚高。
+  const errOverlap = (a: number, b: number, dzKm: number): number => {
+    const alpha = Math.exp(-Math.max(dzKm, 0) / CLOUD_OVERLAP_DECORR_KM);
+    return alpha * Math.max(a, b) + (1 - alpha) * (a + b - a * b);
+  };
   let sum = 0;
-  sum += ENS_ROLE_WEIGHT.golden * union(sGolden, sGolden * 0.85);
-  sum += ENS_ROLE_WEIGHT.high * union(sHigh, sHigh * 0.9);
+  sum += ENS_ROLE_WEIGHT.golden * errOverlap(sGolden, sGolden * 0.85, 1.3);
+  sum += ENS_ROLE_WEIGHT.high * errOverlap(errOverlap(sHigh, sHigh * 0.9, 1.7), sHigh * 0.8, 2.6);
   sum += ENS_ROLE_WEIGHT.mid * sMid;
   sum += ENS_ROLE_WEIGHT.low * sLow;
   // 与主引擎同一归一化分母
@@ -256,6 +264,16 @@ export interface EnsembleOptions {
   /** 太阳高度角随时间变化的采样函数（由调用方提供，避免重复实现天文算法） */
   altitudeAt: (timeMs: number) => number;
   tzOffsetSeconds: number;
+  /**
+   * 事件时刻的太阳方位角（度）。
+   *
+   * **必须由调用方传入**。上一版把采样方位硬编码成 `250`（西南偏西），
+   * 于是：
+   *   · 朝霞（日出方位 60°–115°）实际采样的是背对太阳的方向
+   *   · 高纬夏季日落（方位 300°–320°）同样偏 50° 以上
+   * 30km 处偏 90° 相当于在完全不同的天空采样 —— 集合概率没有意义。
+   */
+  azimuthDeg: number;
   /** 采样步长（分钟），默认 10 —— 集合评分比主引擎粗，不需要 2 分钟 */
   stepMin?: number;
 }
@@ -335,9 +353,10 @@ async function fetchEnsembleProbabilityUncached(
     return [p2 / D, ((l2 / D + 540) % 360) - 180] as const;
   };
 
-  // 用事件时刻的太阳方位角铺环 —— 调用方已把方位角算在 altitudeAt 里不方便，
-  // 所以这里用 0 环 + 沿固定方位；实际影响很小（近场 3 环内方位差异 <2°）
-  const pts = ENS_RINGS.map((d) => (d === 0 ? ([point.lat, point.lon] as const) : dest(point.lat, point.lon, 250, d)));
+  // 用事件时刻的**真实太阳方位角**铺环。
+  // 上一版写死 250°（西南偏西），朝霞与高纬夏季日落完全采错方向。
+  const azimuth = Number.isFinite(opts.azimuthDeg) ? opts.azimuthDeg : 250;
+  const pts = ENS_RINGS.map((d) => (d === 0 ? ([point.lat, point.lon] as const) : dest(point.lat, point.lon, azimuth, d)));
 
   const q = new URLSearchParams({
     latitude: pts.map((p) => p[0].toFixed(4)).join(','),
@@ -409,27 +428,66 @@ async function fetchEnsembleProbabilityUncached(
   const fromMs = eventMs + TIMELINE_START_MIN * 60000;
   const toMs = eventMs + TIMELINE_END_MIN * 60000;
 
-  const peaks: number[] = [];
+  // ── 性能：把「成员 × 环 × 变量」的序列**一次性取出** ──
+  //
+  // 上一版在 `for (t = fromMs; t <= toMs; ...)` 内层循环里反复调用
+  // `seriesOf(...)`：每个成员 7 个时刻 × 3 环 × 6 变量 = 126 次调用，
+  // 每次都要跑一遍 `times.map()` 重建整个数组（24 元素），合计约 6,300 次
+  // 数组分配 / 成员。50 个成员就是 30 万次 —— 纯浪费。
+  // 现在按「成员 × 环」预取 6 条序列，时间循环里只做插值。
+  type RingSeries = {
+    low: number[];
+    mid: number[];
+    high: number[];
+    direct: number[];
+    diffuse: number[];
+    precip: number[];
+  };
+  const seriesByMember = new Map<string, RingSeries[]>();
+  for (const member of members) {
+    const perRing: RingSeries[] = [];
+    for (let ri = 0; ri < ENS_RINGS.length; ri++) {
+      perRing.push({
+        low: seriesOf('cloud_cover_low', member, ri),
+        mid: seriesOf('cloud_cover_mid', member, ri),
+        high: seriesOf('cloud_cover_high', member, ri),
+        direct: seriesOf('direct_radiation', member, ri),
+        diffuse: seriesOf('diffuse_radiation', member, ri),
+        precip: seriesOf('precipitation', member, ri),
+      });
+    }
+    seriesByMember.set(member, perRing);
+  }
+
+  // ── 概率的分子/分母必须同源 ──
+  //
+  // 上一版只把 `peak > 0` 的成员推进 `peaks`，于是**晴空成员被从分母剔除**：
+  //   · 40 个成员报晴空（peak=0）+ 10 个报有烧 → 真实概率 20%，
+  //     代码算出 10/10 = **100%**
+  //   · 46 晴空 + 4 有烧 → `peaks.length < 5` 直接返回 null（白丢一次昂贵请求）
+  //
+  // 正确分母是「所有**可用**成员」—— 只要该成员在窗口内至少有一个时刻数据完整，
+  // 它的 peak 就是 0 也是有效观测（"这个成员认为不会烧"）。
+  const peakScores: number[] = [];
   const peakOffsets: number[] = [];
+  let unusableMembers = 0;
 
   for (const member of members) {
+    const perRing = seriesByMember.get(member)!;
     let peak = 0;
     let peakOffset = 0;
+    let hasValidTimeStep = false;
+
     for (let t = fromMs; t <= toMs; t += stepMin * 60000) {
       // 近场三环的加权平均（0km 0.6 / 30km 0.28 / 80km 0.12）
       const ringW = [0.6, 0.28, 0.12];
       let low = 0, mid = 0, high = 0, direct = 0, diffuse = 0, precip = 0, wsum = 0;
       let usable = true;
       for (let ri = 0; ri < ENS_RINGS.length; ri++) {
-        const sLow = seriesOf('cloud_cover_low', member, ri);
-        const sMid = seriesOf('cloud_cover_mid', member, ri);
-        const sHigh = seriesOf('cloud_cover_high', member, ri);
-        const sDir = seriesOf('direct_radiation', member, ri);
-        const sDif = seriesOf('diffuse_radiation', member, ri);
-        const sPre = seriesOf('precipitation', member, ri);
-        const vLow = interp(times, sLow, t);
-        const vMid = interp(times, sMid, t);
-        const vHigh = interp(times, sHigh, t);
+        const s = perRing[ri];
+        const vLow = interp(times, s.low, t);
+        const vMid = interp(times, s.mid, t);
+        const vHigh = interp(times, s.high, t);
         if (!Number.isFinite(vLow) || !Number.isFinite(vMid) || !Number.isFinite(vHigh)) {
           usable = false;
           break;
@@ -437,12 +495,16 @@ async function fetchEnsembleProbabilityUncached(
         low += (vLow / 100) * ringW[ri];
         mid += (vMid / 100) * ringW[ri];
         high += (vHigh / 100) * ringW[ri];
-        direct += (Number.isFinite(interp(times, sDir, t)) ? interp(times, sDir, t) : 0) * ringW[ri];
-        diffuse += (Number.isFinite(interp(times, sDif, t)) ? interp(times, sDif, t) : 0) * ringW[ri];
-        precip += (Number.isFinite(interp(times, sPre, t)) ? interp(times, sPre, t) : 0) * ringW[ri];
+        const vDir = interp(times, s.direct, t);
+        const vDif = interp(times, s.diffuse, t);
+        const vPre = interp(times, s.precip, t);
+        direct += (Number.isFinite(vDir) ? vDir : 0) * ringW[ri];
+        diffuse += (Number.isFinite(vDif) ? vDif : 0) * ringW[ri];
+        precip += (Number.isFinite(vPre) ? vPre : 0) * ringW[ri];
         wsum += ringW[ri];
       }
       if (!usable || wsum <= 0) continue;
+      hasValidTimeStep = true;
 
       // 集合只给 low/mid/high 三层；把 mid 拆成 700+600、high 拆成 400+300
       const goldenCover = mid * 0.7;
@@ -464,19 +526,28 @@ async function fetchEnsembleProbabilityUncached(
         peakOffset = (t - eventMs) / 60000;
       }
     }
-    if (peak > 0) {
-      peaks.push(peak);
+
+    // 关键：**任何**有过有效时刻的成员都计入分母，peak=0 也要计入
+    if (hasValidTimeStep) {
+      peakScores.push(peak);
       peakOffsets.push(peakOffset);
+    } else {
+      unusableMembers++;
     }
   }
 
-  if (peaks.length < 5) return null;
+  // 至少要有一半成员可用，概率才有统计意义。
+  // 上一版要求 5 个**有正分**的成员，会把"全体一致认为不烧"这种
+  // 最可靠的情形误判为"数据不足"。
+  const totalMembers = members.length;
+  if (peakScores.length < Math.max(5, Math.ceil(totalMembers * 0.5))) return null;
+  if (unusableMembers > totalMembers * 0.5) return null;
 
-  peaks.sort((a, b) => a - b);
-  const qtl = (p: number) => peaks[Math.min(peaks.length - 1, Math.floor(p * peaks.length))];
+  const sortedPeaks = [...peakScores].sort((a, b) => a - b);
+  const qtl = (p: number) => sortedPeaks[Math.min(sortedPeaks.length - 1, Math.floor(p * sortedPeaks.length))];
 
-  peakOffsets.sort((a, b) => a - b);
-  const oq = (p: number) => peakOffsets[Math.min(peakOffsets.length - 1, Math.floor(p * peakOffsets.length))];
+  const sortedOffsets = [...peakOffsets].sort((a, b) => a - b);
+  const oq = (p: number) => sortedOffsets[Math.min(sortedOffsets.length - 1, Math.floor(p * sortedOffsets.length))];
 
   // "能烧"门槛。
   //
@@ -484,11 +555,13 @@ async function fetchEnsembleProbabilityUncached(
   // 干净好天气（45% 黄金层 + 薄卷云）的 p50 落在 0.45~0.65；
   // 整层阴天经 ×0.26 后 p50 < 0.10。取 0.28 使二者清晰分离。
   const BURN_THRESHOLD = 0.28;
-  const probability = peaks.filter((v) => v >= BURN_THRESHOLD).length / peaks.length;
+  const probability = peakScores.filter((v) => v >= BURN_THRESHOLD).length / peakScores.length;
 
   return {
     probability,
-    members: peaks.length,
+    // `members` 现在等于**真正参与统计的成员数**（含 peak=0 的晴空成员），
+    // 与 probability 的分母严格一致。
+    members: peakScores.length,
     p10: qtl(0.1),
     p50: qtl(0.5),
     p90: qtl(0.9),

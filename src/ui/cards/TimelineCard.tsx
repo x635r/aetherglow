@@ -169,7 +169,7 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
       className="col-span-full lg:col-span-6 xl:col-span-4"
       title="分钟级霞光演变"
       subtitle="T0 = 日出/日落时刻 · 每 2 分钟一帧 · 虚线为对照模型"
-      right={<InfoTip text="曲线为 31 帧 × 7 层的光路积分结果。起烧/结束阈值取峰值的 35%；二烧窗口按太阳高度角 −1.4° ~ −7.4°（紫光实测区间）自动选取。" />}
+      right={<InfoTip text="曲线为 31 帧 × 10 层的光路积分结果。起烧/结束阈值取峰值的 35%；二烧窗口按太阳高度角 −1.4° ~ −7.4°（紫光实测区间）自动选取。" />}
       bodyClass="!pt-0"
     >
       <div className="w-full">

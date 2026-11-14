@@ -43,9 +43,13 @@ const GRADE_ALIASES: Record<string, GradeKey> = {
   faint: 'faint', '微烧': 'faint', '微微烧': 'faint', '1': 'faint',
   minor: 'minor', '小烧': 'minor', '2': 'minor',
   moderate: 'moderate', '中烧': 'moderate', '小到中烧': 'moderate', '3': 'moderate',
-  'moderate-to-major': 'majorLow', '中到大烧': 'major',
+  moderateplus: 'moderatePlus',
+  'moderate-to-major': 'majorLow',
+  majordlow: 'majorLow',
+  '中到大烧': 'majorLow',
   major: 'major', '大烧': 'major', '4': 'major',
   extreme: 'extreme', '特大烧': 'extreme', '5': 'extreme',
+  premium: 'premium',
   epic: 'epic', '世纪大烧': 'epic', '6': 'epic',
 };
 
@@ -215,7 +219,15 @@ export function confusionMatrix(
   n = 7,
 ): { raw: number[][]; colNorm: number[][]; rowNorm: number[][] } {
   const raw = Array.from({ length: n }, () => new Array(n).fill(0));
-  for (let i = 0; i < predIdx.length; i++) raw[obsIdx[i]][predIdx[i]]++;
+  for (let i = 0; i < predIdx.length; i++) {
+    const r = obsIdx[i];
+    const c = predIdx[i];
+    // 越界必须显式跳过而不是静默写入。JS 数组对 `raw[3][9]++` 不会报错，
+    // 会把该行悄悄变成稀疏数组，后续 colNorm 的 reduce 求和就错了。
+    if (!Number.isInteger(r) || !Number.isInteger(c)) continue;
+    if (r < 0 || r >= n || c < 0 || c >= n) continue;
+    raw[r][c]++;
+  }
   const colNorm = raw.map((row) => {
     return row.map((v, j) => {
       const colSum = raw.reduce((a, r) => a + r[j], 0);
@@ -334,9 +346,16 @@ async function main(): Promise<void> {
   const obsBurn: number[] = obsIdx.map((i) => (i >= BURN_THRESHOLD_INDEX ? 1 : 0));
   const burnP = preds.map((p) => p.burnProbability);
   const vivid = preds.map((p) => p.vividness);
+  // **必须映射到 0..6 的有序档位（GRADE_INDEX 的值域），而不是 0..9 的
+  // GRADES 数组下标**。上一版直接取 `GRADES` 下标（0..9），而真实标签只有
+  // 7 档（GRADE_INDEX 把 moderatePlus→3、majorLow→4、premium→5 归并了），
+  // `confusionMatrix(predIdx, obsIdx)` 默认 n=7 就会越界写：
+  //   predIdx = 7（extreme）→ raw[obs][7] 虽然还在 7×7 外但 JS 数组不报错，
+  //   实际是把 7×7 矩阵当成稀疏扩展，导致 colNorm 求和错误、出现 NaN；
+  //   且 `adjacentAccuracy` 在 7 档与 10 档之间错位比较，准确率完全失真。
   const predIdx = vivid.map((v) => {
-    for (let i = 0; i < GRADES.length; i++) if (v < GRADES[i].max) return i;
-    return GRADES.length - 1;
+    for (let i = 0; i < GRADES.length; i++) if (v < GRADES[i].max) return GRADE_INDEX[GRADES[i].key];
+    return GRADE_INDEX[GRADES[GRADES.length - 1].key];
   });
 
   const t = bestTss(burnP, obsBurn);

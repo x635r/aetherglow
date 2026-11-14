@@ -231,3 +231,98 @@ export function formatClock(utcMs: number, tzOffsetSeconds = 0, withSeconds = fa
   const ss = String(d.getUTCSeconds()).padStart(2, '0');
   return withSeconds ? `${hh}:${mm}:${ss}` : `${hh}:${mm}`;
 }
+
+// ── 半拉格朗日平流插值（2026-11）────────────────────────────────────────
+
+/**
+ * 用**上游平移采样**替代逐点线性插值 —— 只有当风场确实会平移云场时才有效。
+ *
+ * **要解决的问题**：`interpolateHourly` 对每个变量独立做线性插值。对温度、
+ * 气压这类缓慢变化的量没问题，但**云量是被风平移平流输运的**：
+ * 高空 300hPa 急流 100 km/h 时，一小时里 80km 外的云会移到头顶。
+ * 逐点线性插值会把"云还没到"和"云已经走了"混成一个平均值 ——
+ * 结果是峰值时刻被抹平、云洞位置漂移、有时候干脆判成"整层均匀云"。
+ *
+ * **做法**（一阶半拉格朗日 / upstream advection）：
+ *   要问 t 时刻**本地点**的云量，先算这团空气从前沿风追溯一小时前的位置：
+ *
+ *      x_back = x − v · Δt
+ *
+ *   然后取 `x_back` 处的云量。因为数据只有**本地**序列与**环向**序列
+ *   （沿太阳方位 0/30/80/150/280/450km），所以"上游位置"只能在本序列
+ *   内部用时间平移近似：
+ *
+ *      y(t) ≈ y_series(t − advectLag)
+ *      advectLag = min(Δt/2, distKm / v)
+ *
+ *   `distKm / v` 是"一个云块从采样环移过来需要多久"。对**环向序列**
+ *   这个平移是真实的（同一云系在移到本地前先经过近环）；对 0km 序列
+ *   只能取半格补偿（因为前后两个时刻的风不同）。
+ *
+ * **为什么限制在 Δt/2**：整格平移会让 t 时刻直接取到 t−1h 的值，
+ * 造成相反方向的偏置（"永远晚一小时"）。取半格是折中：既保留平流
+ * 造成的相位移动，又不至于把整条曲线平移。
+ *
+ * **诚实标注**：这是一阶近似，不做真正的二维/三维轨迹追踪。
+ * 它的价值在于**恢复相位信息**（峰值时刻、云洞过境时刻），
+ * 而不是提升数值精度。风向垂直视线时收益最大，平行时接近零。
+ *
+ * @param t           目标采样时刻 (ms)
+ * @param timesHours  样本时刻数组（等间隔，ms）
+ * @param values      对应的值
+ * @param advectLagMs 由风场算出的平流滞后 (ms)
+ * @param fallback    序列为空时的兜底值
+ */
+export function sampleAdvected(
+  t: number,
+  timesMs: number[],
+  values: number[],
+  advectLagMs: number,
+  fallback = 0,
+): number {
+  if (!timesMs.length || !values.length) return fallback;
+  // 平流滞后为 0（无风 / 风向平行视线）时退化为普通线性插值 ——
+  // 保证「没有风场数据时行为完全不变」。
+  if (!Number.isFinite(advectLagMs) || Math.abs(advectLagMs) < 1000) {
+    return samplePiecewise(timesMs, values, t);
+  }
+  const x = t - advectLagMs;
+  // 平移后越界：退回边界值而不是外推（外推会放大噪声）
+  if (x <= timesMs[0]) return values[0];
+  if (x >= timesMs[timesMs.length - 1]) return values[values.length - 1];
+  return samplePiecewise(timesMs, values, x);
+}
+
+/**
+ * 由风场计算「云从采样环移到本地需要的滞后」(ms)。
+ *
+ * 只取**沿视线方向**的投影：垂直视线方向的平流会把云推走而不是推来，
+ * 那不是我们想补偿的相位差。
+ *
+ * @param windFromDeg 风向（**气象约定**：风的来向，°）
+ * @param windSpeedKmh 风速 km/h
+ * @param sightDeg    视线方位（太阳方位，°）
+ * @param ringKm      采样环距离；0 表示本地序列
+ * @returns 滞后 ms（正值表示需回看）；无法计算时为 0
+ */
+export function advectionLagMs(
+  windFromDeg: number,
+  windSpeedKmh: number,
+  sightDeg: number,
+  ringKm: number,
+): number {
+  if (!Number.isFinite(windFromDeg) || !Number.isFinite(windSpeedKmh)) return 0;
+  if (windSpeedKmh <= 0.5) return 0;
+
+  // 气象风向是"来向"：风从 X 吹来 ⇒ 运动方向是 X + 180°。
+  const motionDeg = (windFromDeg + 180) % 360;
+  // 运动方向在视线方向上的投影（+1 = 朝观测者吹来，-1 = 吹走）
+  const along = Math.cos(toRad(motionDeg - sightDeg));
+  // 只有"朝本地吹来"才需要回看上游（along > 0）
+  if (along <= 0.05) return 0;
+
+  const vAlong = windSpeedKmh * along;
+  const travelHours = ringKm > 1 ? ringKm / Math.max(vAlong, 1) : 0.5;
+  // 上限半格（1 小时数据取 30min），避免整格平移造成的反向偏置
+  return clamp(travelHours, 0, 0.5) * 3600 * 1000;
+}

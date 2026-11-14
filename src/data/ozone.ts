@@ -50,7 +50,12 @@ export async function fetchOzoneColumn(
   nearMs: number,
   signal?: AbortSignal,
 ): Promise<OzoneEstimate | null> {
-  const cacheKey = `${OZONE_CACHE_PREFIX}${point.lat.toFixed(2)}|${point.lon.toFixed(2)}`;
+  // 缓存键**必须带日期**。上一版只有 `lat|lon`，于是查询某历史日期的晚霞时
+  // 会命中"今天"缓存的臭氧值 —— 臭氧在天气尺度上虽然变化慢，但跨季节
+  // 可达 ±30%（220 DU ↔ 450 DU），用错日期的柱量会直接错判暮光色相。
+  // 用 UTC 日期而不是本地日期：`nearMs` 已经是事件时刻的 UTC 毫秒。
+  const dayKey = new Date(nearMs).toISOString().slice(0, 10);
+  const cacheKey = `${OZONE_CACHE_PREFIX}${point.lat.toFixed(2)}|${point.lon.toFixed(2)}|${dayKey}`;
   try {
     const raw = localStorage.getItem(cacheKey);
     if (raw) {

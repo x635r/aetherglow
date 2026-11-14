@@ -211,9 +211,12 @@ export const useStore = create<Store>((set, get) => ({
       //
       // 滞后 2–3 天对臭氧完全够用（柱量在天气尺度到季节尺度上缓慢变化），
       // 但它 ±30% 的变化会让黄昏色相偏移 6° —— 值得等这 200ms。
+      //
+      // **必须传 `resolved.eventMs` 而不是 `Date.now()`**：用户可能在查
+      // 明天、甚至几天后的晚霞，用当前时刻会把臭氧窗口整体错位。
       const seqO3 = loadSeq;
       if (get().ozoneDu == null) {
-        void fetchOzoneColumn(query.point, Date.now())
+        void fetchOzoneColumn(query.point, resolved.eventMs)
           .then((o3) => {
             if (seqO3 !== loadSeq || !o3) return;
             // 写入 state 后重算一次；ozoneDu 非空后不会再次触发，无循环
@@ -234,6 +237,9 @@ export const useStore = create<Store>((set, get) => ({
           eventMs: resolved.eventMs,
           mode: query.mode,
           tzOffsetSeconds,
+          // 必须传事件时刻的真实方位角：集合沿太阳方位铺采样环，
+          // 写死 250° 会让朝霞/高纬日落采到背对太阳的天空。
+          azimuthDeg: resolved.azimuthDeg,
           altitudeAt: (t: number) => sunPosition(t, query.point.lat, query.point.lon).altitude,
         })
           .then((ens) => {

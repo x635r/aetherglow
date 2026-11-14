@@ -150,7 +150,7 @@ score_r = 质量 × 受光 × T_to_ring × 可见性 × 近远权重
 - **Canvas**：自研 2D 光路剖面渲染器（`src/render/sectionRenderer.ts`）
 - **状态**：Zustand
 - **数据**：Open-Meteo（ECMWF IFS / NOAA GFS / DWD ICON）+ CAMS 气溶胶 + Copernicus DEM
-- **测试**：Vitest，**206 个用例**（校准 13 · 物理单元 36 · 不变量 48 · 回归 68 · 集合 11 · 验证指标 27 · 极区 3）
+- **测试**：Vitest，**271 个用例**（校准 13 · 物理单元 36 · 不变量 48 · 回归 133 · 集合 11 · 验证指标 27 · 极区 3）
 
 ## 目录结构
 
@@ -221,7 +221,7 @@ aetherglow/
 npm install
 npm run dev        # http://127.0.0.1:5199
 npm run build      # 类型检查 + 生产构建
-npm test           # 206 个测试
+npm test           # 271 个测试
 npm run validate   # 用实测标签评估准确率（见下方「验证」）
 ```
 

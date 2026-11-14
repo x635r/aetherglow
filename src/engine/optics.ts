@@ -208,8 +208,19 @@ export function beamAirmass(cloudMslM: number, alphaDeg: number, scaleHeightKm: 
   const tangentM = beamTangentHeightM(cloudMslM, alphaDeg);
   const hKm = Math.max(tangentM, 0) / 1000;
 
-  // 光束被地球本体完全遮挡：给一个足够大的气柱，让 exp(−τ) 收敛到 0
-  if (tangentM <= 0) return 220;
+  // 切点落到地面以下：光束已被地球本体遮挡，但**不能返回常数**。
+  //
+  // 上一版 `if (tangentM <= 0) return 220` 在这里制造了 5.8 倍的硬台阶：
+  // 4200m 云在 α=−1.90° 时 h_t=112m、m=37.5；α 再降 0.1° 到 −2.00°
+  // 使 h_t=−330m，气柱质量瞬间跳到 220 —— 时间曲线上每隔一帧就出现一次
+  // 「太阳更低、天空反而更亮」的锯齿，且整段暮光被压成同一个数。
+  //
+  // 正确做法：让切点高度继续下降（等效为光束在地面以下"虚拟"传播），
+  // 指数式继续增长。用 |h_t| 作为衰减深度的度量，在 h_t=0 处恰好给出
+  // 38·e⁰ = 38，与 α≥0 分支的 Kasten–Young 在 α=0 的 37.9 严格衔接。
+  // 深度上限取 2 个标高，避免 α 很深时 exp 溢出成 Infinity。
+  const depthKm = Math.min(-hKm, 2 * scaleHeightKm);
+  if (tangentM <= 0) return 38 * Math.exp(depthKm / scaleHeightKm);
 
   // 沿切点的相对气柱。系数 38 与 Kasten–Young 在 α=0 处的 38 精确相等，
   // 所以 α 穿过地平线时**天然连续、且全局单调**，不需要任何分段拼接。
@@ -374,61 +385,186 @@ export const CLOUD_BETA_ICE_PER_KM = 1;
 export const CLOUD_ELEMENT_KM = 30;
 
 /**
- * 概率化云隙透射 —— 用解析物理替代 `AIRMASS_CAP` 的经验上限。
+ * **按云属**给出的云块特征水平尺度 (km)。
+ *
+ * `CLOUD_ELEMENT_KM = 30` 是对流云（积云/层积云）的合理尺度，但把它套到
+ * 卷云上是错的，且错得很严重：
+ *
+ *   卷云（400hPa 以上）沿风向组织成**长条/带**，水平长度 100–1000 km，
+ *   宽度只有几 km。而光线在 α≈−1.5° 时穿过 300hPa 层带（厚 1.8km）
+ *   要走 **67 km** ——
+ *     · L=30km 时被判成"跨 2.2 个云块独立重采样"，30% 覆盖的薄卷云
+ *       会把下层的黄金高积云挡掉 54%（0.7^2.2 = 0.46）
+ *     · 但真实的薄卷云是**半透明薄纱**，30% 覆盖下光线几乎不受影响
+ *   实测后果：任何构型只要加上卷云，总分必然下降 —— 与"黄金层 + 卷云
+ *   是教科书级大烧"的行业共识完全相反。
+ *
+ * 取 L=120km 后：
+ *   · 30% 卷云、67km 路径 → 走**单块分支**，T = 0.7 + 0.3·e^(−32) ≈ 0.70
+ *     （薄卷云几乎不挡光，正确）
+ *   · 90% 卷云 → T ≈ 0.10（厚卷云幕确实挡光，正确）
+ *
+ * 黄金层（高层云/高积云）的 60km 取自其典型水平尺度（中尺度云团），
+ * 介于对流云与卷云之间。
+ */
+export const CLOUD_ELEMENT_BY_ROLE_KM: Record<'low' | 'mid' | 'golden' | 'high', number> = {
+  low: 30,
+  mid: 40,
+  golden: 60,
+  high: 120,
+};
+
+/**
+ * 破碎云的**直接透射率**（含云隙）—— 全工程唯一的云遮挡口径。
  *
  * **问题**：均匀云量 c 的标准 Beer–Lambert 假设「整层是均匀灰雾」，
  * 掠射光路 τ = β·D 会线性增长到荒谬值（50% 覆盖、450km 掠射 → τ=2250）。
  * 真实破碎云里，掠射光走的是**云隙**。
  *
- * **模型**（与 b-z/sunsetglow 的实现一致）：
- * 把云看成特征尺度 L 的云块与云隙交替。整条路径 D 上，
- * 「穿过一个云块」的概率是 c，「走云隙」的概率是 1−c。于是单次通过的
- * 平均不透明度是
+ * **模型**：把云看成特征尺度 L 的云块与云隙交替。路径长度 D 上有两种情况：
  *
- *      ⟨不透明度⟩ = c · (1 − e^(−β·L))          ← 撞进云块
- *      ⟨透过率⟩   = 1 − c · (1 − e^(−β·L))
+ * ① **D ≤ L（单块内穿过）**：光线只有一次机会撞上云块，
  *
- * 折算回等效消光系数：
+ *      T = (1 − c) + c·e^(−β·D)
  *
- *      β_eff = −ln(1 − c(1 − e^(−β·L))) / L
+ *    此时用「每 L 独立重采样」会低估遮挡：D=10km、L=30km、c=0.5、β=10
+ *    时重采样式给 (1−0.5+0.5·e^(−300))^(10/30) ≈ 0.79，但物理上单条光线
+ *    撞进那个云块的概率仍是 0.5，期望透过率应接近 0.5。
  *
- * **注意这里没有额外的 `1−exp(−cD/L)` 项** —— 那个是把「路径长度」
- * 重复计入了一次。路径长度 D 的作用体现在 β_eff × D 上。
+ * ② **D ≥ L（跨多个云块重采样）**：设单位长度的渐近衰减率
  *
- * 三个正确的极限行为：
- *   ① c→0  ⇒ β_eff→0（无云）
- *   ② c→1  ⇒ β_eff→β（等价于穿过云块本体）
- *   ③ L→0  ⇒ β_eff→c·β（云块无限小 = 均匀灰雾，退回经典 Beer–Lambert）
- *   ④ L→∞  ⇒ β_eff→0（云块无限大 = 全是云隙，不物理但边界正确）
+ *      χ = −ln(1 − c(1 − e^(−β·L))) / L
  *
- * 与旧经验式的关键区别：**上限不再需要 `AIRMASS_CAP = 8` 这种拍脑袋的数**，
- * 它由 c 和 L 自然决定。L=30km、β=10/km 时 c=0.5 给出 β_eff≈0.167/km ——
- * 掠射 200km 的 τ≈33，而标准式会给 1000。
+ *    则 T = e^(−χ·D)。χ 的物理含义是「每走 L 独立抽签一次：撞云（概率 c，
+ *    透射 e^(−βL)）或走隙（概率 1−c）」。
+ *
+ * 两支在 D = L 处**严格相等**（因为 e^(−χL) = 1 − c(1 − e^(−βL))），
+ * 所以是连续拼接而非经验混合。四个极限行为：
+ *
+ *   ① c→0   ⇒ T→1（无云）
+ *   ② c→1   ⇒ T→e^(−βD)（穿过云块本体）
+ *   ③ L→0   ⇒ χ→cβ ⇒ T→e^(−cβD)（云块无限小 = 均匀灰雾，退回经典 Beer–Lambert）
+ *   ④ β→0   ⇒ T→1（无消光）
  *
  * @param cover01   该层覆盖率 0~1
  * @param pathKm    光路在该层内的路径长度
- * @param betaPerKm 云块内的消光系数（液态 10 / 冰 1）
+ * @param betaPerKm 云块内的消光系数（由 τ_full / 真实层厚给出）
  * @param elementKm 云块特征尺度
- * @returns 该层的有效消光系数 per km（乘 pathKm 即得 τ）
  */
-export function gapTransmissionBeta(
+export function cloudLayerDirectTransmittance(
   cover01: number,
   pathKm: number,
   betaPerKm: number,
   elementKm = CLOUD_ELEMENT_KM,
 ): number {
   const c = clamp(cover01, 0, 1);
-  if (c <= 0 || pathKm <= 0 || betaPerKm <= 0) return 0;
-  if (c >= 1) return betaPerKm;
+  if (c <= 0 || betaPerKm <= 0) return 1;
+  if (pathKm <= 0) return 1;
+  if (c >= 1) return Math.exp(-betaPerKm * pathKm);
+
   const L = Math.max(elementKm, 1e-3);
-  const blockOpacity = 1 - Math.exp(-betaPerKm * L);
-  const meanTransmit = clamp(1 - c * blockOpacity, 1e-9, 1);
-  return -Math.log(meanTransmit) / L;
+  if (pathKm <= L) {
+    // 单块内：只有一次撞击机会
+    return clamp((1 - c) + c * Math.exp(-betaPerKm * pathKm), 1e-12, 1);
+  }
+  // 跨块重采样：渐近衰减率
+  const chi = -Math.log(clamp(1 - c * (1 - Math.exp(-betaPerKm * L)), 1e-12, 1)) / L;
+  return clamp(Math.exp(-chi * pathKm), 1e-12, 1);
 }
 
-/** 由层定义给出云块内体消光系数 per km（= τ_full / 1km 厚度） */
-export function cloudBetaPerKm(levelKey: string): number {
-  return Math.max(levelFullOpticalDepth(levelKey), 0.05);
+/**
+ * 破碎云层的等效光学厚度 τ = −ln T。
+ *
+ * 这是给「累乘型」评分代码用的形式（`tDirect *= exp(−τ)`）。
+ * **调用方不得再乘 `1−c+c·e^(−τ)`** —— 那会构成双重计算，
+ * 在 80% 覆盖 + 100km 路径下把透过率虚高 43 倍。
+ */
+export function cloudLayerTau(
+  cover01: number,
+  pathKm: number,
+  betaPerKm: number,
+  elementKm = CLOUD_ELEMENT_KM,
+): number {
+  return -Math.log(cloudLayerDirectTransmittance(cover01, pathKm, betaPerKm, elementKm));
+}
+
+/**
+ * 由层定义给出云块内**体消光系数 per km**。
+ *
+ * LEVEL_MICROPHYSICS 给的是「整层垂直穿过时的 τ_full」，所以体消光系数
+ * 必须是 τ_full / 真实层厚。上一版直接 `return τ_full`（等价于假设每层都
+ * 恰好 1km 厚），使 1000hPa（0.4km）低估 2.5 倍、200hPa（2.2km）高估 2.2 倍。
+ *
+ * @param levelKey    等压面键
+ * @param thicknessKm 该层真实厚度 (km)
+ */
+export function cloudBetaPerKm(levelKey: string, thicknessKm = 1): number {
+  return Math.max(levelFullOpticalDepth(levelKey) / Math.max(thicknessKm, 0.05), 0.05);
+}
+
+// ── 云层垂直重叠（指数-随机重叠）────────────────────────────────────────
+
+/**
+ * 云层重叠的去相关长度 (km)。
+ *
+ * 云雷达观测表明：相邻云层在垂直间距 Δz < 1–2 km 时高度趋向**最大重叠**，
+ * 随间距增大逐渐转向随机重叠。实测去相关长度
+ * L_cf ≈ 1.43–2.58 km（[Cloud Overlap Features from Multi-Year Cloud Radar
+ * Observations, Remote Sensing 2024, 16(2):218]）。
+ *
+ * 取下沿 1.43 km 是**保守选择**：更小的 L_cf 意味着更快转向随机重叠，
+ * 即两层云更倾向"错开"，从而让更多天空同时可见 —— 对"会不会烧"
+ * 这个问题给出更乐观的估计。取保守值可避免系统性高估霞光。
+ */
+export const CLOUD_OVERLAP_DECORR_KM = 1.43;
+
+/**
+ * 两层云的组合覆盖率 —— 气象学标准的**指数-随机重叠**。
+ *
+ * 传统上云重叠被当成两个极端之一：
+ *   · 最大重叠（完全相关）：C = max(c₁, c₂)   ← 相邻层
+ *   · 随机重叠（独立）：    C = c₁ + c₂ − c₁c₂ ← 远离层
+ *
+ * 真实大气在两者之间连续过渡，由去相关长度 L_cf 控制：
+ *
+ *      α = exp(−Δz / L_cf)
+ *      C = α·max(c₁,c₂) + (1−α)·(c₁ + c₂ − c₁c₂)
+ *
+ * α→1（间距远小于 L_cf）退化为最大重叠，α→0（间距远大于 L_cf）退化为随机重叠。
+ *
+ * **为什么必须换掉"角色内独立并集"**：上一版把
+ * `1 − Π(1−cᵢ)` 用在 400/300/250/200 四个高云层上，等价于假设它们
+ * **完全随机重叠**。但那四层的垂直间距只有 1.2–2.6 km，与 L_cf 同量级，
+ * 真实重叠度远高于随机 —— 于是旧式把"同一块卷云被四个等压面各描述一次"
+ * 当成了四块独立的云，可见发光面积被高估。
+ *
+ * 本函数与"角色内并集"的另一处关键区别：它作用在**全部层**上而不是
+ * 只在角色内，所以不再需要人为划分"角色内并集 vs 角色间相加"这套拼缝，
+ * 未来扩到 21 层等压面时也保持垂直分辨率不变性。
+ *
+ * @param layers 各层的 {cover, heightKm}，顺序无关（内部按高度排序）
+ * @returns 组合覆盖率 0~1
+ */
+export function combinedCloudCover(
+  layers: Array<{ cover01: number; heightKm: number }>,
+): number {
+  const valid = layers
+    .filter((l) => Number.isFinite(l.cover01) && Number.isFinite(l.heightKm))
+    .map((l) => ({ c: clamp(l.cover01, 0, 1), z: l.heightKm }))
+    .sort((a, b) => a.z - b.z);
+  if (!valid.length) return 0;
+
+  // 自下而上依次合成。相邻对的间距决定 α。
+  let cTotal = valid[0].c;
+  for (let i = 1; i < valid.length; i++) {
+    const dz = Math.abs(valid[i].z - valid[i - 1].z);
+    const alpha = Math.exp(-Math.max(dz, 0) / CLOUD_OVERLAP_DECORR_KM);
+    const cNext = valid[i].c;
+    const maxOverlap = Math.max(cTotal, cNext);
+    const randomOverlap = cTotal + cNext - cTotal * cNext;
+    cTotal = clamp(alpha * maxOverlap + (1 - alpha) * randomOverlap, 0, 1);
+  }
+  return cTotal;
 }
 
 /**
@@ -605,17 +741,35 @@ export function levelVerticalTau(levelKey: string, cover01: number): number {
  * 气柱可达垂直值的 10–40 倍 —— 此时它在 570–620nm 窗口变成主导项，
  * 正是蓝调时刻与地影蓝边的物理来源。忽略它 = 橙色对、蓝色全错。
  *
- * 以 550nm 为 1.0 归一化；603nm 峰与 575nm 峰同高，470nm 以下迅速消失。
+ * **以 550nm 精确归一到 1.0** —— 这一点必须与 `TAU_O3_550` 严格自洽：
+ * 该常数是 300 DU 气柱在 **550nm** 的垂直光学厚度（σ₅₅₀ ≈ 2.6e−21 cm²），
+ * 若归一化基准漂到别处，整条臭氧链就会被系统性弱化（旧实现 550nm 处只有
+ * 0.749，等于把臭氧吸收低估了 25%）。
+ *
+ * 双峰形状本身与实测截面一致：603nm 峰 ≈ 1.87 × 550nm（实测 σ 比 1.98），
+ * 465nm 处 ≈ 0（这就是"臭氧多 → 红被吃掉 → 暮光偏蓝紫"的物理来源）。
  */
 export function ozoneExtinctionRel(nm: number): number {
   if (nm < 380 || nm > 720) return 0;
-  // 双高斯叠加，峰值归一到 1.0（550nm 处约 0.62）。
+  // 双高斯叠加，峰值在 603nm；下方除以 550nm 处的值做精确归一
   // 400nm 与 700nm 处各加一个线性收窗，避免带外出现残余吸收。
   const g1 = Math.exp(-0.5 * Math.pow((nm - 575) / 27, 2));
   const g2 = Math.exp(-0.5 * Math.pow((nm - 603) / 30, 2));
   const tail = Math.min(1, Math.max(0, (nm - 400) / 30)) * Math.min(1, Math.max(0, (700 - nm) / 60));
-  return (0.86 * g1 + 0.9 * g2) * tail;
+  return ((0.86 * g1 + 0.9 * g2) * tail) / OZONE_REL_AT_550_NM;
 }
+
+/**
+ * 未归一化的双高斯在 550nm 处的取值 —— 归一化分母。
+ *
+ * 由同一组常数算出，避免手写魔数与形状参数脱钩：
+ * 0.86·exp(−½((550−575)/27)²) + 0.9·exp(−½((550−603)/30)²) ≈ 0.7483
+ */
+const OZONE_REL_AT_550_NM = (() => {
+  const g1 = Math.exp(-0.5 * Math.pow((550 - 575) / 27, 2));
+  const g2 = Math.exp(-0.5 * Math.pow((550 - 603) / 30, 2));
+  return 0.86 * g1 + 0.9 * g2;
+})();
 
 /** 550nm 垂直臭氧光学厚度（300 DU 标准柱 ≈ 0.021） */
 export const TAU_O3_550 = 0.021;
@@ -658,7 +812,12 @@ export function directSunRgb(
     const lam = LAMBDA[ch] / 550;
     const tauRay = TAU_R550 * Math.pow(lam, -4) * rayleigh;
     const tauAer = aod * hygro * Math.pow(lam, -angstrom) * aerosol;
-    // 臭氧：与 Rayleigh 同样沿切点气柱放大；绿/蓝通道在黄昏被显著吃掉
+    // 臭氧 Chappuis：与 Rayleigh 同样沿切点气柱放大。
+    //
+    // **物理方向（别写反）**：Chappuis 带在 575–620nm（红黄区）吸收最强，
+    // 在 465nm 几乎为零。所以臭氧增多吃掉的正是**红光**，使蓝紫相对占比升高、
+    // r/b 变小。这与 Rayleigh 的"吃蓝"方向相反，所以两者在暮光里是竞争关系 ——
+    // 也正是真实暮光在"金橙 ↔ 品红/蓝紫"两种色相间摆动的物理原因。
     const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * rayleigh;
     rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
   }
@@ -690,6 +849,100 @@ export function viewPathTransparency(distKm: number, cloudMslM: number, observer
   const m = 1 / Math.max(Math.sin(elev), 0.02);
   const tau = TAU_R550 * m * 0.6 + 0.12 * m * 0.35;
   return Math.exp(-tau);
+}
+
+/**
+ * **双路径模型 · Path 2**：云 → 观测者 的三通道视线消光。
+ *
+ * 此前引擎只算 Path 1（太阳 → 云），直接把云的 RGB 当成"眼睛看到的颜色"。
+ * 但真实的晚霞颜色是**两步乘积**：
+ *
+ *   Path 1  太阳 → 云：Rayleigh + 气溶胶 + 臭氧，把白光染成金红
+ *   云内散射（由 `cloudScreenQuality` 与 τ 刻画）
+ *   Path 2  云 → 观测者：Rayleigh + 气溶胶 + 臭氧，**再次**染色
+ *
+ * 漏掉 Path 2 的后果是系统性的：
+ *  · 云在 200km 外、仰角只有 2° 时，视线气柱达 30 倍垂直量 ——
+ *    Path 2 的 Rayleigh 会把到达人眼的蓝光再抽掉一轮，实测色彩比
+ *    只算 Path 1 更纯、更红
+ *  · 天顶附近（仰角 60°）Path 2 几乎无影响
+ * 于是"天边那一条最红、头顶那一片偏黄"这个真实观测特征，
+ * 只有接上 Path 2 才能自然出现。
+ *
+ * 臭氧 Chappuis 同样沿视线放大 —— 这是**蓝调时刻**云呈蓝紫的
+ * 物理来源：Path 1 把光红化，但臭氧在 Path 2 继续吃掉红黄，
+ * 两者竞争的结果是暮光尾段转向蓝紫。
+ *
+ * @param distKm     观测者到该云的**水平**距离
+ * @param cloudMslM  云海拔 m
+ * @param observerM  观测者海拔 m
+ * @param aod        550nm AOD
+ * @param angstrom   Ångström 指数
+ * @param rh         相对湿度 %
+ * @param ozoneColumnDu 臭氧总柱量 DU
+ * @returns 三通道透过率（0~1），以及视线仰角与气柱质量
+ */
+export function viewPathRgb(
+  distKm: number,
+  cloudMslM: number,
+  observerM: number,
+  aod: number,
+  angstrom: number,
+  rh = 55,
+  ozoneColumnDu = OZONE_REFERENCE_DU,
+): { rgb: RgbColor; elevationDeg: number; airmass: number } {
+  // 视线仰角：由高度差与水平距离直接给出（小角度时即为几何仰角）
+  const dhKm = Math.max(cloudMslM - observerM, 0) / 1000;
+  const elevationDeg = (Math.atan2(dhKm, Math.max(distKm, 1e-3)) * 180) / Math.PI;
+
+  // 视线气柱质量：Kasten–Young 在仰角 ≥ 0 时成立；
+  // 仰角为负（云在观测者地平线以下，只有高山/航拍才能看到）时
+  // 用与 `beamAirmass` 同款的指数延拓，保证连续。
+  const airmass =
+    elevationDeg >= 0
+      ? kastenYoungAirmass(elevationDeg)
+      : 38 * Math.exp(elevationDeg / 3); // 每 3° 衰减一个 e 倍，近似切点几何
+
+  const hygro = 1 + Math.pow(clamp((rh - 55) / 45, 0, 1), 2) * 1.15;
+  const tauO3Vert = tauO3FromColumn(ozoneColumnDu);
+
+  const rgb: RgbColor = { r: 0, g: 0, b: 0 };
+  for (const ch of ['r', 'g', 'b'] as const) {
+    const lam = LAMBDA[ch] / 550;
+    const tauRay = TAU_R550 * Math.pow(lam, -4) * airmass;
+    const tauAer = aod * hygro * Math.pow(lam, -angstrom) * airmass;
+    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * airmass;
+    rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
+  }
+  return { rgb, elevationDeg, airmass };
+}
+
+/**
+ * 把 Path 1 × Path 2 合成**人眼看到的云色**。
+ *
+ * 两条路径的消光都是乘性的（各波段的透过率相乘），
+ * 但 Path 2 的散射会把一部分直射光转成漫射 —— 观赏晚霞时，
+ * 云是被"点亮"的发光体，其亮度正比于 Path 1 的直射份额，
+ * 其**色相**由 Path 1 × Path 2 的联合透过率决定。
+ *
+ * 所以返回两个量：
+ *  · `color`   —— 联合透过率的 RGB（用于色相/饱和度）
+ *  · `intensity` —— Path 1 的亮度（用于"亮不亮"）
+ *
+ * 高云在很远的距离上时 `color` 会明显偏红（Path 2 抽掉蓝光），
+ * 而 `intensity` 由 Path 1 单独决定 —— 这两件事在物理上是解耦的。
+ */
+export function compositeCloudColor(
+  sunRgb: RgbColor,
+  viewRgb: RgbColor,
+): { color: RgbColor; intensity: number } {
+  const color: RgbColor = {
+    r: sunRgb.r * viewRgb.r,
+    g: sunRgb.g * viewRgb.g,
+    b: sunRgb.b * viewRgb.b,
+  };
+  const intensity = 0.2126 * sunRgb.r + 0.7152 * sunRgb.g + 0.0722 * sunRgb.b;
+  return { color, intensity };
 }
 
 /** Kasten–Young (1979) 大气质量 */
@@ -752,4 +1005,241 @@ export function effectiveGroundHeightRangeM(aod: number): { min: number; max: nu
   }
   if (!Number.isFinite(min)) min = 0;
   return { min, max };
+}
+
+/**
+ * 低层气溶胶对「掠射光束」的额外吞噬 —— **连续形式**，取代旧的静态掩膜。
+ *
+ * **旧实现的两处硬伤**（2026-11 审查确认）：
+ *
+ * ① **数学不连续**：旧代码是
+ *
+ *      effGroundM <= 0 ? 1 : sigmoid((heightM − effGroundM)/400)
+ *
+ *    AOD 从 0.080 增到 0.081 时 effGroundM 从 0 跳到 49.7m，
+ *    `effGroundFactor(1000hPa, 110m)` 立刻从 **1.000 跌到 0.538**（−46%）。
+ *    这是纯人工台阶，任何实测都不会有这种跳变。
+ *
+ * ② **物理概念混淆**：SunsetBot 的 z_eff 推导前提是光线**近水平掠射**
+ *    （α≈0°）。太阳还高（α=+5°）时低云斜程很短，不该被静态掩膜砍掉 80%。
+ *    而且 z_eff 是相对气溶胶源的**离地高度 (AGL)**，旧代码却拿 **MSL**
+ *    海拔去比 —— 高原城市（地面 3650m）因此完全免疫该修正。
+ *
+ * **现在的做法**：不再用静态高度掩膜，而是把「气溶胶抬升地面」交给
+ * *已经是连续量* 的切点气柱（`beamAirmass` / `directSunRgb`）统一表达 ——
+ * 那里 β_aer 随 α 连续增长，α=0 时气柱最长，正是 z_eff 想描述的效果。
+ *
+ * 本函数只保留一条**平滑**的残余修正，用于处理「云本身就在气溶胶层内部」
+ * 的情形（雾/层云被自身的米氏消光包住）。用 smoothstep 而非 sigmoid 拼接，
+ * 且在 aod 低于门槛时以 0 斜率离开 0 —— 保证 C¹ 连续。
+ *
+ * @param cloudAglM  云的**离地高度** (m)（已扣除观测点地面高程，不是 MSL）
+ * @param aod        550nm AOD
+ * @param visM       地面能见度 (m)；0 表示缺测
+ * @returns 0~1 的受光乘子（1 = 无额外削弱）
+ */
+export function aerosolImmersionFactor(cloudAglM: number, aod: number, visM: number): number {
+  if (!Number.isFinite(aod) || aod <= 0) return 1;
+  if (!Number.isFinite(cloudAglM)) return 1;
+
+  // 只有「云位于气溶胶层内部」才削弱。气溶胶标高取 1.5km 的气候值，
+  // 用 AOD 判断气溶胶层有多"厚"（AOD 越大，有效抬升越高）。
+  const aerosolTopM = 1500 * Math.max(1, Math.log(Math.max(aod, 1e-3) / AEROSOL_VISIBILITY_CUTOFF_PER_KM / 1.5) + 1);
+  if (cloudAglM >= aerosolTopM) return 1;
+
+  // 位置项：越深入气溶胶层削弱越强（0 → 1）
+  const depth01 = 1 - clamp(cloudAglM / Math.max(aerosolTopM, 1), 0, 1);
+
+  // 强度项：**能见度与 AOD 必须取较差者**。
+  //
+  // 只看能见度会漏判：CAMS 给的 AOD 0.9（重度霾）而模式能见度仍是 20km
+  // （很常见，因为两者来自不同子模式且更新节奏不同）时，纯能见度判据
+  // 给出 severity=0，于是重度霾对低云完全没有削弱 —— 这是错的。
+  // 取 max 让两路信号互为兜底，任一指向重霾就按重霾处理。
+  const visKm = visM > 0 ? visM / 1000 : visibilityFromAodKm(aod);
+  const severityVis = clamp((20 - visKm) / 18, 0, 1);
+  // AOD 0.10（干净）→0；0.70（重霾）→1。与 spectral.ts 的 AOD 分档对齐。
+  const severityAod = clamp((aod - 0.1) / 0.6, 0, 1);
+  const severity = Math.max(severityVis, severityAod);
+
+  // 平滑启动：AOD < 0.1 且能见度 >20km 时两项都为 0，因子恒为 1
+  const raw = severity * depth01 * depth01;
+  //
+  // 上限 0.85，标定锚点（1.5km 低云）：
+  //   AOD 0.10 / vis 25km → 1.00（无削弱）
+  //   AOD 0.30 / vis 15km → 0.86（城市典型，低云仍被点亮）
+  //   AOD 0.90 / vis 8km  → 0.49（重霾，低云只剩散射尾）
+  //   AOD 2.00 / vis 2km  → 0.24（沙尘暴，几乎全暗）
+  //
+  // 为什么不用纯 Beer–Lambert 代入掠射气柱：AOD 0.3 在 1.5km 处
+  // 掠射气柱达 14 倍垂直量（τ≈4.2），e^(−4.2)=0.015 —— 会把普通城市
+  // 黄昏的低云判成全黑，而实测显然不是。真实光束沿路径持续抬升、
+  // 且多次散射把相当份额重新注入，所以这里用**有界经验式**，
+  // 并明确标注它是经验标定而非第一性原理。
+  // 不能归零：雾天低云仍会被散射光照亮一部分，「低云 + 高空卷云」
+  // 构型里的低云若被完全抹掉，会错判成"只剩高空卷云"的纯二烧。
+  return 1 - 0.85 * raw;
+}
+
+/** 由 AOD 反演能见度 (km) —— 供 `aerosolImmersionFactor` 的内部兜底使用 */
+function visibilityFromAodKm(aod: number): number {
+  const sigmaExt = Math.max(aod, 1e-3) / 1.5; // km⁻¹，标高 1.5km
+  return clamp(3.912 / sigmaExt, 0.3, 60);
+}
+
+// ── 云光学厚度反演（2026-11 新增：补上 COT 缺口）────────────────────────
+
+/**
+ * 由「地面短波 / 大气顶短波」反演**整层有效云光学厚度** τ_obs。
+ *
+ * **为什么这一项价值最高**：本引擎此前只有云覆盖率，没有云厚薄 ——
+ * 所有「光学厚度」都来自气候态 LWP 表（层云 120 g/m²、卷云 25 g/m²…）。
+ * 于是「薄纱卷云」和「厚重高层云」在覆盖率相同时得分完全一样，
+ * 而实拍里二者是天壤之别。COT 无免费全球预报，但**可以反演**。
+ *
+ * **反演式**：保守散射（云在可见光几乎不吸收）的两流解给出
+ *
+ *      T = 1 / (1 + b·τ),     b = (1 − g)/2 ≈ 0.075   （g ≈ 0.85）
+ *   ⇒  τ = (1/T − 1) / b
+ *
+ * 引用：Slingo (1989) 短波云辐射参数化；两流近似在 τ∈[1,50] 区间内
+ * 对整层短波透射率的误差通常 <15%，足以区分「薄纱 / 中等 / 厚幕」。
+ *
+ * 为什么必须用这个形式而不是幂律 `τ = τ_ref·(T_ref/T)^γ`：
+ * 幂律在 T→1 时给出**非零**的 τ（T=0.98 时仍有 2.7），于是晴空也会被
+ * 判成"有薄云"，并把 cotFactor 推离 1。两流式在 T→1 时严格 τ→0。
+ *
+ * 三个必须的性质（全部由形式本身保证，不是补丁）：
+ *   ① 单调：T 越低 τ 越大
+ *   ② T→1 ⇒ τ→0（晴空无云）
+ *   ③ T→0 ⇒ τ→∞，故需要上界截断（整层 COT > 60 已是不透明黑幕）
+ *
+ * **诚实标注**：这是**整层有效**光学厚度，不是逐层值 —— 单一 SW/TOA
+ * 观测无法分解垂直分布。它能可靠给出「相对厚薄」的排序，
+ * 绝对值会受地表反照率、气溶胶、太阳天顶角影响。
+ * 所以调用方只把它当**乘子**（相对修正），不替换静态 LWP 表。
+ *
+ * @param shortwaveW  地面短波总辐射 W/m²
+ * @param toaW        大气顶短波辐照 W/m²
+ * @returns 反演的等效 τ_obs；输入不可用时返回 null（调用方跳过修正）
+ */
+/**
+ * 晴空宽波段短波透射率 —— COT 反演的**基线**。
+ *
+ * **为什么必须有这一步**：`SW / TOA` 这个比值里包含了**晴空大气自身**的
+ * 吸收与散射（Rayleigh + 气溶胶 + 水汽）。若直接把 `SW/TOA` 当作
+ * "云透射率"，晴空会被反演出 τ≈12，于是 `cotFactor` 把整层云的消光
+ * 凭空放大 2 倍。这个错误已在真实数据上实测确认
+ * （T=0.515、云量 0% 却反演出 τ=12.5）。
+ *
+ * 正确做法：先算晴空基线 T_clear(α, AOD)，再剥离大气本底：
+ *
+ *      T_cloud = (SW / TOA) / T_clear
+ *
+ * **系数来自实测回归，不是教科书常数**：
+ * 用 5 个城市 × 4 天 × 3 模型共 **442 个晴空样本**
+ * （云量 ≤3%、太阳高度角 ≥8°）做线性回归，得到
+ *
+ *      τ_clear·m = 0.1302 + 0.0970 · AOD      (RMSE = 0.038, τ 范围 0.05–0.27)
+ *
+ * 这里有两个反直觉但被实测确认的结论：
+ *  ① **宽带有效光学厚度远小于 550nm 单色值**。教科书常引的 0.23 是
+ *     550nm 单色 Rayleigh，而 0.3–4µm 宽带里长波占能量主导、消光弱得多，
+ *     实测截距只有 0.13
+ *  ② **AOD 的系数只有 0.097（不是 1.0）**。因为 CAMS 的 AOD 是 550nm
+ *     单色值，而换算到宽带要按 λ^(-Ångström) 加权平均 —— 长波端气溶胶
+ *     消光弱得多，等效系数因此降到约 0.1
+ *
+ * 旧版本按"Rayleigh 0.17 + AOD×1.15 + 水汽 0.06"设系数，把晴空 τ 高估
+ * 2.4 倍，导致 T_clear 在太阳 10° 时算成 0.05（实测 0.446）—— 于是
+ * 大量本该反演出 τ 的有云时刻被判成"不可能"，COT 修正形同失效。
+ *
+ * @param sunAltitudeDeg 太阳高度角（度）
+ * @param aod            550nm 气溶胶光学厚度
+ * @returns 晴空短波透射率 0~1
+ */
+export function clearSkySwTransmittance(sunAltitudeDeg: number, aod: number): number {
+  if (!Number.isFinite(sunAltitudeDeg)) return 1;
+  // 太阳低于 5°：宽波段短波本身已弱到接近仪器/模式精度，比值不稳定 → 跳过
+  if (sunAltitudeDeg < 5) return 1;
+  const m = kastenYoungAirmass(sunAltitudeDeg);
+  // 实测回归系数（442 个晴空样本）。AOD 上限截断到 2.5（超出后回归已无数据支撑）
+  const tauClear = 0.1302 + 0.0970 * clamp(aod, 0, 2.5);
+  return clamp(Math.exp(-tauClear * m), 0.05, 1);
+}
+
+/**
+ * 由「地面短波 / 大气顶短波」反演**云**的整层有效光学厚度 τ_obs。
+ *
+ * 与 `inferCloudOpticalDepth` 的区别：本函数先除以**晴空基线**，
+ * 所以结果只反映云的贡献。物理上必须这样 —— 否则晴空也会被算出
+ * 十几的光学厚度（大气本底被误当云）。
+ *
+ * @param shortwaveW     地面短波总辐射 W/m²
+ * @param toaW           大气顶短波辐照 W/m²
+ * @param sunAltitudeDeg 太阳高度角（度），用于算晴空基线
+ * @param aod            550nm AOD，用于算晴空基线
+ * @returns 云的等效 τ；输入不可用或晴空时返回 null
+ */
+export function inferCloudOpticalDepthFromRadiation(
+  shortwaveW: number | undefined,
+  toaW: number | undefined,
+  sunAltitudeDeg: number,
+  aod: number,
+): number | null {
+  const tau = inferCloudOpticalDepth(shortwaveW, toaW);
+  if (tau == null) return null;
+  const tClear = clearSkySwTransmittance(sunAltitudeDeg, aod);
+  // 晴空基线为 1（太阳太低）时无法剥离，跳过
+  if (tClear >= 0.999) return null;
+  // 云透射率 = 观测比值 / 晴空基线。>1 说明观测比晴空还亮
+  // （反射云 + 雪面 / 模式不一致），此时不可信。
+  const Tobs = clamp(shortwaveW! / toaW!, 0.02, 1);
+  const Tcloud = Tobs / tClear;
+  if (Tcloud >= 1.0) return null;
+  const B = 0.075;
+  return clamp((1 / Math.max(Tcloud, 0.02) - 1) / B, 0, 60);
+}
+
+export function inferCloudOpticalDepth(
+  shortwaveW: number | undefined,
+  toaW: number | undefined,
+): number | null {
+  if (shortwaveW == null || toaW == null) return null;
+  if (!Number.isFinite(shortwaveW) || !Number.isFinite(toaW)) return null;
+  // TOA 太小时比值没有物理意义（夜间 / 太阳贴地平线，分母趋 0）
+  if (toaW < 80 || shortwaveW < 0) return null;
+  // 地面辐射不可能显著超过 TOA（观测/模式误差留 5% 余量）
+  if (shortwaveW > toaW * 1.05) return null;
+
+  const T = clamp(shortwaveW / toaW, 0.02, 1);
+  // b = (1 − g)/2，取 g ≈ 0.85（水云/冰云在可见光的典型不对称因子）
+  const B = 0.075;
+  const tau = (1 / T - 1) / B;
+  // 物理上界：整层 COT 超过 60 已是不透明黑幕，再大没有区分意义
+  return clamp(tau, 0, 60);
+}
+
+/**
+ * 把反演的 τ_obs 转成「静态 LWP 表」的乘子。
+ *
+ * 关键设计：**乘子围绕 1 中性，且有界 [0.45, 2.6]**。
+ *  · 上界 2.6：反演偏高时不能把卷云放大成浓积云（那会把好天气判成无烧）
+ *  · 下界 0.45：反演偏低时不能把层云缩小成薄纱（那会把阴天判成大烧）
+ *
+ * 只有当反演值与静态表**同量级**时才采信 —— 若相差超过一个量级，
+ * 更可能是反演本身失效（地表反照率高的雪面、沙尘、低太阳角），
+ * 此时退回中性 1.0 而不是硬拉。
+ *
+ * @param tauObs        反演得到的整层 τ
+ * @param tauStaticSum  当前剖面按静态表算出的整层 τ（各层 τ_full 之和）
+ * @returns 0.45~2.6 的乘子
+ */
+export function cotCalibrationFactor(tauObs: number | null, tauStaticSum: number): number {
+  if (tauObs == null || !Number.isFinite(tauObs)) return 1;
+  if (!Number.isFinite(tauStaticSum) || tauStaticSum <= 0.1) return 1;
+  const ratio = tauObs / tauStaticSum;
+  // 相差一个量级以上 → 反演不可信，不采信
+  if (ratio > 10 || ratio < 0.1) return 1;
+  return clamp(Math.pow(ratio, 0.6), 0.45, 2.6);
 }

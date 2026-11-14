@@ -7,16 +7,31 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  aerosolImmersionFactor,
   beamAirmass,
   beamTangentHeightM,
+  cloudBetaPerKm,
+  CLOUD_ELEMENT_BY_ROLE_KM,
+  CLOUD_ELEMENT_KM,
+  CLOUD_OVERLAP_DECORR_KM,
+  cloudLayerDirectTransmittance,
+  cloudLayerTau,
   cloudPhaseTauFactor,
+  combinedCloudCover,
+  cotCalibrationFactor,
+  inferCloudOpticalDepth,
+  inferCloudOpticalDepthFromRadiation,
+  clearSkySwTransmittance,
+  colorChroma,
+  compositeCloudColor,
+  viewPathRgb,
   CLOUD_BETA_ICE_PER_KM,
   CLOUD_BETA_LIQUID_PER_KM,
-  gapTransmissionBeta,
   directBeamAirmass,
   directSunRgb,
   effectiveGroundHeightM,
   effectiveGroundHeightRangeM,
+  levelFullOpticalDepth,
   ozoneExtinctionRel,
   tauO3FromColumn,
   slantAirmass,
@@ -29,6 +44,7 @@ import {
   predictSunset,
   rayMarchingTransmittance,
 } from '../src/engine/SunsetPhysicsEngine';
+import { advectionLagMs, sampleAdvected } from '../src/engine/astro';
 import { evaluateSpectral } from '../src/engine/spectral';
 import { GRADES, LEVEL_KEYS } from '../src/engine/constants';
 import type { LevelKey } from '../src/engine/constants';
@@ -41,16 +57,23 @@ const STD_H: Record<LevelKey, number> = {
 
 const EVENT = Date.UTC(2026, 10, 3, 9, 5, 0);
 
-function sample(t: number, cover: Partial<Record<LevelKey, number>>, o: { precip?: number; vis?: number; humidity?: number } = {}): HourlySample {
+function sample(t: number, cover: Partial<Record<LevelKey, number>>, o: { precip?: number; vis?: number; humidity?: number; layerSummary?: { low: number; mid: number; high: number } } = {}): HourlySample {
   const cloud = {} as Record<LevelKey, number>;
   const levelHeightM = {} as Record<LevelKey, number>;
   for (const k of LEVEL_KEYS) {
     cloud[k] = (cover[k] ?? 0) * 100;
     levelHeightM[k] = STD_H[k];
   }
+  // 默认仍给 0（保持既有 86 条测试的基线不变）；
+  // 需要真实格点汇总的场景显式传 `layerSummary`，否则会触发
+  // `crossCheckLayerCloud` 的"等压面与汇总值矛盾"惩罚。
+  const ls = o.layerSummary;
   return {
     timeMs: t, cloud, levelHeightM, levelTempC: {},
-    cloudLow: 0, cloudMid: 0, cloudHigh: 0, cloudTotal: 0,
+    cloudLow: (ls?.low ?? 0) * 100,
+    cloudMid: (ls?.mid ?? 0) * 100,
+    cloudHigh: (ls?.high ?? 0) * 100,
+    cloudTotal: ls ? Math.max(ls.low, ls.mid, ls.high) * 100 : 0,
     precipitation: o.precip ?? 0,
     humidity: o.humidity ?? 50,
     visibilityM: o.vis ?? 25000, surfacePressureHpa: 1013,
@@ -446,15 +469,22 @@ describe('P1 分级标尺可达', () => {
   });
 
   it('鲜艳度上限落在物理可达区间内', () => {
-    // 用 7 层云量 + 3 通道消光的模型，实测绝对上限约 1.15~1.2（特大烧）。
+    // 用 10 层云量 + 3 通道消光的模型，P0-1 修复后的实测绝对上限约 1.15。
     // 「世纪大烧」（>1.5）在当前数据模型下不可达 —— 这是诚实的局限，
     // 需要云光学厚度 / 云相态才能进一步拉开动态范围（见 ROADMAP）。
+    //
+    // **为什么最优构型只有「一层高云 + 黄金层」，不含 400hPa**：
+    // 光路在 α≈−1.5° 时是掠射的，太阳光要到达 9.2km 的卷云，必须先穿过
+    // 7.2km 那层的整条水平路径（约 50km）。70% 覆盖、β≈0.45/km 时
+    // 该层等效 τ≈2，把光衰减到 14% —— 所以**下层高云会遮暗上层高云**。
+    // 这是真实的物理（厚高层云确实会掩住其上的卷云），不是 bug，
+    // 见紧随其后的"多层高云互相遮挡"回归测试。
     let max = 0;
-    for (const g of [0.4, 0.5, 0.56, 0.62]) {
-      for (const h of [0.7, 0.8, 0.86, 0.95]) {
+    for (const g of [0.35, 0.4, 0.45, 0.5, 0.56]) {
+      for (const h of [0.65, 0.7, 0.8, 0.9]) {
         for (const aod of [0.02, 0.05]) {
           const p = predict(
-            bundle(C({ '600': g, '500': g, '400': h, '300': h }), {
+            bundle(C({ '600': g, '500': g, '300': h }), {
               aod, pm25: 4, vis: 38000, humidity: 35,
             }),
           );
@@ -464,6 +494,20 @@ describe('P1 分级标尺可达', () => {
     }
     expect(max).toBeGreaterThan(1.0);
     expect(max).toBeLessThan(1.6);
+  });
+
+  it('下层高云会遮暗上层高云（掠射多输入的显式回归）', () => {
+    // 这条**不是**要求"加层必然加分"，而是锁住正确的物理方向：
+    // 9.2km 卷云单独存在时最亮；在它下面加一层 7.2km 高云，
+    // 该层会吃掉到达 9.2km 的掠射光，总分因此可以下降 ——
+    // 但只要仍有可见发光面，就不该跌到「无烧」。
+    const highOnly = predict(bundle(C({ '300': 0.7 }), { aod: 0.05, pm25: 4, vis: 38000 }));
+    const twoDecks = predict(bundle(C({ '400': 0.7, '300': 0.7 }), { aod: 0.05, pm25: 4, vis: 38000 }));
+
+    // 两层都在发光，总分必须显著高于「无烧」
+    expect(twoDecks.vividness).toBeGreaterThan(0.3);
+    // 且加层后的衰减是温和的（不是把上层彻底抹黑）
+    expect(twoDecks.vividness).toBeGreaterThan(highOnly.vividness * 0.6);
   });
 });
 
@@ -559,43 +603,88 @@ describe('P1 整层可降水总量对浑浊的影响', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// 13. 概率化云隙透射（2026-11 替换经验气团上限）
+// 13. 破碎云直接透射（2026-11 修复 P0-1 双重计算）
 // ═══════════════════════════════════════════════════════════════════════
-describe('P1 概率化云隙透射', () => {
-  it('三个极限行为正确', () => {
-    // c=1 ⇒ β_eff = β（穿过云块本体）
-    expect(gapTransmissionBeta(1, 450, 10)).toBeCloseTo(10, 6);
-    // c=0 ⇒ 0（无云）
-    expect(gapTransmissionBeta(0, 450, 10)).toBe(0);
-    // path=0 ⇒ 0（短路径撞不上云）
-    expect(gapTransmissionBeta(0.5, 0, 10)).toBe(0);
+describe('P0-1 破碎云直接透射（含云隙，唯一口径）', () => {
+  it('极限行为正确', () => {
+    // c=1 ⇒ 纯 Beer–Lambert，穿过云块本体
+    expect(cloudLayerDirectTransmittance(1, 450, 10)).toBeCloseTo(Math.exp(-4500), 300);
+    // c=0 ⇒ 1（无云，全透）
+    expect(cloudLayerDirectTransmittance(0, 450, 10)).toBe(1);
+    // path=0 ⇒ 1（没走路，不衰减）
+    expect(cloudLayerDirectTransmittance(0.5, 0, 10)).toBe(1);
+    // β=0 ⇒ 1（无消光）
+    expect(cloudLayerDirectTransmittance(0.5, 450, 0)).toBe(1);
   });
 
-  it('覆盖率越高有效消光越强（单调）', () => {
-    const vals = [0.1, 0.3, 0.5, 0.7, 0.9].map((c) => gapTransmissionBeta(c, 200, 10));
-    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeGreaterThan(vals[i - 1]);
+  it('覆盖率越高透过率越低（单调）', () => {
+    const vals = [0.1, 0.3, 0.5, 0.7, 0.9].map((c) => cloudLayerDirectTransmittance(c, 200, 10));
+    for (let i = 1; i < vals.length; i++) expect(vals[i]).toBeLessThan(vals[i - 1]);
   });
 
-  it('液态云的消光强于冰云（同样覆盖率与路径）', () => {
-    const liquid = gapTransmissionBeta(0.5, 200, CLOUD_BETA_LIQUID_PER_KM);
-    const ice = gapTransmissionBeta(0.5, 200, CLOUD_BETA_ICE_PER_KM);
-    expect(liquid).toBeGreaterThan(ice);
+  it('液态云的透过率低于冰云（同样覆盖率与路径）', () => {
+    const liquid = cloudLayerDirectTransmittance(0.5, 200, CLOUD_BETA_LIQUID_PER_KM);
+    const ice = cloudLayerDirectTransmittance(0.5, 200, CLOUD_BETA_ICE_PER_KM);
+    expect(liquid).toBeLessThan(ice);
   });
 
-  it('破碎云的掠射 τ 远小于均匀灰雾假设', () => {
-    // 50% 覆盖、450km 掠射、β=10/km
-    const betaEff = gapTransmissionBeta(0.5, 450, 10);
-    const tau = betaEff * 450;
-    // 均匀灰雾会给 0.5 × 10 × 450 = 2250；概率化云隙应给出 O(10) 量级
+  it('短路径（D < L）不得低估遮挡 —— 这是旧公式的核心缺陷', () => {
+    // c=0.5, β=10, L=30km, D=10km
+    // 旧"每 L 重采样"式给 0.5^(10/30) ≈ 0.794（严重低估遮挡）
+    // 物理上单条光线撞进云块的概率仍是 0.5，期望透过率应接近 0.5
+    const t = cloudLayerDirectTransmittance(0.5, 10, 10, 30);
+    expect(t).toBeLessThan(0.55);
+    expect(t).toBeGreaterThan(0.45);
+    // 绝不能接近旧式的 0.794
+    expect(t).toBeLessThan(0.7);
+  });
+
+  it('两支在 D = L 处严格连续（不是经验拼接）', () => {
+    const L = 30;
+    const below = cloudLayerDirectTransmittance(0.4, L - 1e-9, 8, L);
+    const above = cloudLayerDirectTransmittance(0.4, L + 1e-9, 8, L);
+    expect(Math.abs(below - above)).toBeLessThan(1e-5);
+  });
+
+  it('长路径趋向指数衰减且 τ 随路径线性', () => {
+    // D=200km 与 D=400km 都远大于 L=30km，τ 应严格正比
+    const t200 = cloudLayerDirectTransmittance(0.5, 200, 10);
+    const t400 = cloudLayerDirectTransmittance(0.5, 400, 10);
+    expect(Math.log(t400) / Math.log(t200)).toBeCloseTo(2, 2);
+    // τ 量级必须在 O(1)–O(10)，而不是均匀灰雾的 2250
+    const tau = -Math.log(t200);
     expect(tau).toBeLessThan(50);
     expect(tau).toBeGreaterThan(1);
   });
 
-  it('不再是"路径越长越离谱"——τ 随路径近似线性而非爆炸', () => {
-    // 概率化云隙的 β_eff 与路径无关，τ 严格正比于路径
-    const b100 = gapTransmissionBeta(0.5, 100, 10);
-    const b400 = gapTransmissionBeta(0.5, 400, 10);
-    expect(b400).toBeCloseTo(b100, 10);
+  it('cloudLayerTau 与 transmittance 严格互为 −ln', () => {
+    const t = cloudLayerDirectTransmittance(0.6, 120, 7);
+    const tau = cloudLayerTau(0.6, 120, 7);
+    expect(Math.exp(-tau)).toBeCloseTo(t, 12);
+  });
+
+  it('旧公式会把 80% 覆盖 100km 的透过率虚高 43 倍（回归锁）', () => {
+    // 这是审查文档 P0-1 的核心数字：正确值 ≈ 0.0047，双重计算后 ≈ 0.2037
+    const correct = cloudLayerDirectTransmittance(0.8, 100, 10);
+    expect(correct).toBeLessThan(0.02);
+  });
+});
+
+describe('P0-1 体消光系数按真实层厚归一', () => {
+  it('厚度不改变 τ_full，但改变 β（per km）', () => {
+    const thin = cloudBetaPerKm('200', 2.2);
+    const thick = cloudBetaPerKm('200', 0.4);
+    // 同样 τ_full，层越薄体消光越强
+    expect(thick).toBeGreaterThan(thin);
+    expect(thick / thin).toBeCloseTo(2.2 / 0.4, 1);
+  });
+
+  it('单位厚度时退化为 τ_full（兼容旧调用）', () => {
+    expect(cloudBetaPerKm('850', 1)).toBeCloseTo(levelFullOpticalDepth('850'), 6);
+  });
+
+  it('有下限保护，不会出现 0 消光', () => {
+    expect(cloudBetaPerKm('200', 100)).toBeGreaterThanOrEqual(0.05);
   });
 });
 
@@ -849,5 +938,476 @@ describe('P1 十层等压面', () => {
     const p = predict(bundle(C({ '600': 0.45 })));
     const hs = LEVEL_KEYS.map((k) => p.layers.find((l) => l.key === k)!.altitudeM);
     for (let i = 1; i < hs.length; i++) expect(hs[i]).toBeGreaterThan(hs[i - 1]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 17. 云层垂直重叠：指数-随机重叠（2026-11 算法升级）
+// ═══════════════════════════════════════════════════════════════════════
+describe('云重叠：指数-随机重叠取代独立并集', () => {
+  it('同一高度的两层：退化为最大重叠 C = max(c1,c2)', () => {
+    const c = combinedCloudCover([
+      { cover01: 0.3, heightKm: 5 },
+      { cover01: 0.8, heightKm: 5 },
+    ]);
+    expect(c).toBeCloseTo(0.8, 6);
+  });
+
+  it('间距远大于去相关长度：退化为随机重叠 C = c1+c2-c1c2', () => {
+    const dz = 20 * CLOUD_OVERLAP_DECORR_KM;
+    const c = combinedCloudCover([
+      { cover01: 0.5, heightKm: 1 },
+      { cover01: 0.5, heightKm: 1 + dz },
+    ]);
+    expect(c).toBeCloseTo(0.75, 3);
+  });
+
+  it('始终介于最大重叠与随机重叠之间（不是两个极端之一）', () => {
+    const c = combinedCloudCover([
+      { cover01: 0.4, heightKm: 4 },
+      { cover01: 0.6, heightKm: 5.4 }, // Δz ≈ 1.4km ≈ L_cf
+    ]);
+    const maxOverlap = 0.6;
+    const randomOverlap = 0.4 + 0.6 - 0.24;
+    expect(c).toBeGreaterThan(maxOverlap);
+    expect(c).toBeLessThan(randomOverlap);
+  });
+
+  it('对层序不敏感（内部按高度排序）', () => {
+    const a = combinedCloudCover([
+      { cover01: 0.3, heightKm: 3 },
+      { cover01: 0.7, heightKm: 6 },
+      { cover01: 0.5, heightKm: 9 },
+    ]);
+    const b = combinedCloudCover([
+      { cover01: 0.5, heightKm: 9 },
+      { cover01: 0.3, heightKm: 3 },
+      { cover01: 0.7, heightKm: 6 },
+    ]);
+    expect(a).toBeCloseTo(b, 10);
+  });
+
+  it('单层与空输入不崩', () => {
+    expect(combinedCloudCover([{ cover01: 0.42, heightKm: 5 }])).toBeCloseTo(0.42, 10);
+    expect(combinedCloudCover([])).toBe(0);
+  });
+
+  it('含 NaN 的层被忽略而不是传播 NaN', () => {
+    const c = combinedCloudCover([
+      { cover01: 0.5, heightKm: 4 },
+      { cover01: NaN, heightKm: 8 },
+      { cover01: 0.5, heightKm: Number.NaN },
+    ]);
+    expect(Number.isFinite(c)).toBe(true);
+    expect(c).toBeCloseTo(0.5, 10);
+  });
+
+  it('比独立并集更保守：四层相邻高云的发光面积被压低', () => {
+    // 400/300/250/200 间距 1.2–2.6km，独立并集给 1-(1-0.6)^4 = 0.974，
+    // 指数-随机重叠应明显低于此（真实重叠度高于随机）
+    const layers = [
+      { cover01: 0.6, heightKm: 7.2 },
+      { cover01: 0.6, heightKm: 9.2 },
+      { cover01: 0.6, heightKm: 10.4 },
+      { cover01: 0.6, heightKm: 11.8 },
+    ];
+    const overlap = combinedCloudCover(layers);
+    const independent = 1 - Math.pow(1 - 0.6, 4);
+    expect(overlap).toBeLessThan(independent);
+    expect(overlap).toBeGreaterThan(0.6);
+  });
+});
+
+describe('云块特征尺度必须按云属取', () => {
+  it('卷云尺度远大于对流云（否则薄卷云会挡住下层）', () => {
+    expect(CLOUD_ELEMENT_BY_ROLE_KM.high).toBeGreaterThan(CLOUD_ELEMENT_BY_ROLE_KM.low * 2);
+    expect(CLOUD_ELEMENT_BY_ROLE_KM.low).toBe(CLOUD_ELEMENT_KM);
+  });
+
+  it('30% 薄卷云几乎不衰减下层光线（用对流云尺度则会衰减一半）', () => {
+    const pathKm = 67; // α≈−1.5° 穿过 300hPa 层带的水平路径
+    const cirrusScale = CLOUD_ELEMENT_BY_ROLE_KM.high;
+    const cumulusScale = CLOUD_ELEMENT_BY_ROLE_KM.low;
+    // 薄卷云 β 很小（τ_full≈0.9 / 1.8km 厚 ≈ 0.5/km）
+    const tCirrus = cloudLayerDirectTransmittance(0.3, pathKm, 0.5, cirrusScale);
+    const tCumulus = cloudLayerDirectTransmittance(0.3, pathKm, 0.5, cumulusScale);
+    expect(tCirrus).toBeGreaterThan(0.65);
+    expect(tCumulus).toBeLessThan(0.55);
+  });
+
+  it('加 30~50% 卷云应提升总分（"黄金层+卷云"是教科书级大烧）', () => {
+    const base = predict(bundle(C({ '600': 0.6, '500': 0.6 }), { aod: 0.05, pm25: 4, vis: 38000 }));
+    const withCirrus = predict(
+      bundle(C({ '600': 0.6, '500': 0.6, '300': 0.45 }), { aod: 0.05, pm25: 4, vis: 38000 }),
+    );
+    expect(withCirrus.vividness).toBeGreaterThan(base.vividness);
+  });
+
+  it('薄卷云在 70% 附近最优、满铺仍可，但覆盖曲线必须有峰值（不是单调）', () => {
+    // 卷云是"画布"：薄且满铺也是好画面，所以它的最优点比黄金层更靠右。
+    // 但**必须存在峰值** —— 若单调递增到 100%，说明云幕自我遮挡没起作用。
+    const mk = (h: number) => ({
+      models: {
+        ecmwf: {
+          model: 'ecmwf' as ModelId,
+          label: 'ecmwf',
+          rings: RING.map((d) => ({
+            ringKm: d,
+            point: { lat: 31.23, lon: 121.47 },
+            samples: TIMES.map((t) =>
+              sample(t, { '600': 0.45, '500': 0.4, '300': h }, {
+                vis: 38000,
+                humidity: 35,
+                layerSummary: { low: 0, mid: 0, high: h },
+              }),
+            ),
+          })),
+          aerosol: RING.map((d) => ({
+            ringKm: d,
+            point: { lat: 31.23, lon: 121.47 },
+            samples: TIMES.map((t) => ({ timeMs: t, aod: 0.05, pm25: 4, dust: 5, pm10: 8, humidity: 35 })),
+          })),
+          gridLat: 31.23, gridLon: 121.47, gridElevationM: 4,
+        },
+      } as never,
+      terrain: RING.map((d) => ({ ringKm: d, point: { lat: 31.23, lon: 121.47 }, elevationM: 4 })),
+      localElevationM: 4, fetchedAt: Date.now(), apiCalls: 1, cached: false,
+    });
+
+    const at70 = predict(mk(0.7) as never);
+    const at100 = predict(mk(1.0) as never);
+    // 满铺薄卷云仍然好看（画布特性），但必须低于峰值
+    expect(at100.vividness).toBeGreaterThan(0.4);
+    expect(at100.vividness).toBeLessThan(at70.vividness);
+  });
+
+  it('黄金层覆盖率必须存在峰值（云幕自我遮挡）', () => {
+    const at = (g: number) => predict(bundle(C({ '600': g, '500': g }), { aod: 0.05, pm25: 4, vis: 38000 }));
+    const peak = at(0.6);
+    expect(at(0.3).vividness).toBeLessThan(peak.vividness);
+    expect(at(1.0).vividness).toBeLessThan(peak.vividness);
+    // 满铺黄金层降幅必须显著（不是微弱下调）
+    expect(at(1.0).vividness).toBeLessThan(peak.vividness * 0.6);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 18. 云光学厚度反演（SW/TOA → COT）：补上"只有云量、没有云厚"的缺口
+// ═══════════════════════════════════════════════════════════════════════
+describe('COT 反演：从 SW/TOA 得到真实云厚', () => {
+  it('透射率越低，反演 τ 越大（单调）', () => {
+    const taus = [0.95, 0.7, 0.55, 0.35, 0.15].map((T) => inferCloudOpticalDepth(600 * T, 600));
+    for (let i = 1; i < taus.length; i++) {
+      expect(taus[i]!).toBeGreaterThan(taus[i - 1]!);
+    }
+  });
+
+  it('晴空（T≈1）反演出接近 0 的 τ', () => {
+    const tau = inferCloudOpticalDepth(590, 600);
+    expect(tau).not.toBeNull();
+    expect(tau!).toBeLessThan(1);
+  });
+
+  it('两流式自洽：T=0.55 反演回 τ = (1/0.55-1)/0.075 ≈ 10.9', () => {
+    const tau = inferCloudOpticalDepth(330, 600);
+    expect(tau!).toBeCloseTo((1 / 0.55 - 1) / 0.075, 1);
+    // 物理量级正确：中云整层 COT 约 10
+    expect(tau!).toBeGreaterThan(8);
+    expect(tau!).toBeLessThan(15);
+  });
+
+  it('τ 有上界，T→0 不发散', () => {
+    const tau = inferCloudOpticalDepth(1, 600);
+    expect(tau!).toBeLessThanOrEqual(60);
+    expect(Number.isFinite(tau!)).toBe(true);
+  });
+
+  it('输入不可用时返回 null（绝不编造）', () => {
+    expect(inferCloudOpticalDepth(undefined, 600)).toBeNull();
+    expect(inferCloudOpticalDepth(400, undefined)).toBeNull();
+    // TOA 太小（夜间 / 太阳贴地平线）：比值无物理意义
+    expect(inferCloudOpticalDepth(2, 30)).toBeNull();
+    // 地面辐射超过 TOA（观测误差）：不可用
+    expect(inferCloudOpticalDepth(700, 600)).toBeNull();
+  });
+
+  it('乘子围绕 1 中性：τ_obs 与静态表一致时不修正', () => {
+    expect(cotCalibrationFactor(6, 6)).toBeCloseTo(1, 6);
+  });
+
+  it('乘子有界，且方向正确', () => {
+    expect(cotCalibrationFactor(20, 5)).toBeGreaterThan(1);
+    expect(cotCalibrationFactor(1, 5)).toBeLessThan(1);
+    expect(cotCalibrationFactor(1000, 5)).toBeLessThanOrEqual(2.6);
+    expect(cotCalibrationFactor(0.01, 5)).toBeGreaterThanOrEqual(0.45);
+  });
+
+  it('相差一个量级以上时判定反演失效，退回中性', () => {
+    // 反演 60、静态 2 → 比值 30 > 10，不可信
+    expect(cotCalibrationFactor(60, 2)).toBe(1);
+    // 反演 0.1、静态 10 → 比值 0.01 < 0.1，不可信
+    expect(cotCalibrationFactor(0.1, 10)).toBe(1);
+  });
+
+  it('无可用反演时乘子为 1（不改变任何行为）', () => {
+    expect(cotCalibrationFactor(null, 8)).toBe(1);
+    expect(cotCalibrationFactor(NaN, 8)).toBe(1);
+  });
+
+  it('薄卷云 vs 厚层云：同样 70% 覆盖率应给出不同消光', () => {
+    // 静态表下两层 τ_full 相近（8 vs 18），但真实 COT 差 10 倍
+    const thin = cotCalibrationFactor(2, 8);
+    const thick = cotCalibrationFactor(40, 8);
+    expect(thick).toBeGreaterThan(thin);
+    expect(thick / thin).toBeGreaterThan(3);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 19. 深对流（积雨云黑幕）与层状云画布的区分
+// ═══════════════════════════════════════════════════════════════════════
+describe('深对流判据：CAPE + 降水 + 深厚云体', () => {
+  const mkBundle = (opts: { cape: number; precip: number; cover: Partial<Record<LevelKey, number>> }) => ({
+    models: {
+      ecmwf: {
+        model: 'ecmwf' as ModelId,
+        label: 'ecmwf',
+        rings: RING.map((d) => ({
+          ringKm: d,
+          point: { lat: 31.23, lon: 121.47 },
+          samples: TIMES.map((t) => {
+            const s = sample(t, opts.cover, { precip: opts.precip, vis: 25000, humidity: 70 });
+            return { ...s, cape: opts.cape };
+          }),
+        })),
+        aerosol: RING.map((d) => ({
+          ringKm: d,
+          point: { lat: 31.23, lon: 121.47 },
+          samples: TIMES.map((t) => ({ timeMs: t, aod: 0.15, pm25: 12, dust: 6, pm10: 18, humidity: 60 })),
+        })),
+        gridLat: 31.23, gridLon: 121.47, gridElevationM: 4,
+      },
+    } as never,
+    terrain: RING.map((d) => ({ ringKm: d, point: { lat: 31.23, lon: 121.47 }, elevationM: 4 })),
+    localElevationM: 4, fetchedAt: Date.now(), apiCalls: 1, cached: false,
+  });
+
+  it('高 CAPE + 降水 + 深厚云体 → 判为深对流并显著压低', () => {
+    const cover = { '700': 0.8, '600': 0.85, '500': 0.85, '400': 0.8 };
+    const conv = predict(mkBundle({ cape: 1800, precip: 3, cover }) as never);
+    const strat = predict(mkBundle({ cape: 100, precip: 0, cover }) as never);
+    expect(conv.vividness).toBeLessThan(strat.vividness * 0.6);
+  });
+
+  it('高 CAPE 但无降水（残余位能）不应误判', () => {
+    const cover = { '600': 0.6, '500': 0.6 };
+    const a = predict(mkBundle({ cape: 2000, precip: 0, cover }) as never);
+    const b = predict(mkBundle({ cape: 100, precip: 0, cover }) as never);
+    expect(a.vividness).toBeCloseTo(b.vividness, 4);
+  });
+
+  it('有降水但 CAPE 低（层状云降水）不应触发深对流判据', () => {
+    // 注意：有降水时 `cloud-wall` 否决（wallFactor）会先介入，这是**独立且
+    // 更早**的判据。本测试只验证 deepConvection 的边际贡献：
+    // 高 CAPE 组必须比低 CAPE 组**显著更低**（差额来自 0.18 乘子），
+    // 而两组都已受 cloud-wall 影响，所以不能要求'接近相等'。
+    const cover = { '600': 0.6, '500': 0.6 };
+    const lowCape = predict(mkBundle({ cape: 100, precip: 2, cover }) as never);
+    const highCape = predict(mkBundle({ cape: 1800, precip: 2, cover }) as never);
+    expect(highCape.vividness).toBeLessThan(lowCape.vividness * 0.5);
+    // 低 CAPE 组不走 0.18，因此不应低到「无烧」
+    expect(lowCape.vividness).toBeGreaterThan(0.15);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 20. 双路径模型：云 → 观测者 的视线光谱消光
+// ═══════════════════════════════════════════════════════════════════════
+describe('Path 2：视线光谱消光', () => {
+  it('天顶方向（d≈0）气柱质量趋近 1，几乎无消光', () => {
+    const v = viewPathRgb(0, 4200, 100, 0.1, 1.3, 55, 300);
+    expect(v.airmass).toBeLessThan(1.1);
+    expect(v.rgb.r).toBeGreaterThan(0.75);
+  });
+
+  it('距离越远、仰角越低，气柱质量越大（单调）', () => {
+    const ms = [0, 30, 80, 150, 280, 450].map(
+      (d) => viewPathRgb(d, 4200, 100, 0.1, 1.3, 55, 300).airmass,
+    );
+    for (let i = 1; i < ms.length; i++) expect(ms[i]).toBeGreaterThan(ms[i - 1]);
+  });
+
+  it('视线消光对蓝通道的削减强于红通道（Rayleigh λ⁻⁴）', () => {
+    const v = viewPathRgb(150, 4200, 100, 0.1, 1.3, 55, 300);
+    expect(v.rgb.b).toBeLessThan(v.rgb.r);
+  });
+
+  it('**核心效果**：合成色相随距离单调红移（"天边那条最红"）', () => {
+    const sun = directSunRgb(-1.5, 4200, 0.1, 1.3, 55, 300);
+    const hues = [0, 30, 80, 150, 280, 450].map((d) => {
+      const v = viewPathRgb(d, 4200, 100, 0.1, 1.3, 55, 300);
+      return colorChroma(compositeCloudColor(sun.rgb, v.rgb).color).hue;
+    });
+    // hue 数值越小 = 越接近纯红（HSV 中 0=红、60=黄）
+    for (let i = 1; i < hues.length; i++) expect(hues[i]).toBeLessThan(hues[i - 1]);
+    // 从橙黄（>20°）到深红（<15°）必须跨过可感知的幅度
+    expect(hues[0] - hues[hues.length - 1]).toBeGreaterThan(10);
+  });
+
+  it('臭氧增多会让合成色 r/b 变小（吃红光的方向必须正确）', () => {
+    const sun = directSunRgb(-3, 4200, 0.1, 1.3, 55, 300);
+    const ratioAt = (du: number) => {
+      const v = viewPathRgb(150, 4200, 100, 0.1, 1.3, 55, du);
+      const c = compositeCloudColor(sun.rgb, v.rgb).color;
+      return c.r / Math.max(c.b, 1e-12);
+    };
+    expect(ratioAt(450)).toBeLessThan(ratioAt(220));
+  });
+
+  it('强度（亮度）与色相解耦：Path 2 只改色相，不改 Path 1 的亮度', () => {
+    const sun = directSunRgb(-1.5, 4200, 0.1, 1.3, 55, 300);
+    const near = compositeCloudColor(sun.rgb, viewPathRgb(0, 4200, 100, 0.1, 1.3, 55, 300).rgb);
+    const far = compositeCloudColor(sun.rgb, viewPathRgb(450, 4200, 100, 0.1, 1.3, 55, 300).rgb);
+    // 亮度（来自 Path 1）完全一致
+    expect(far.intensity).toBeCloseTo(near.intensity, 12);
+    // 但色相必须不同（Path 2 起作用了）
+    expect(colorChroma(far.color).hue).toBeLessThan(colorChroma(near.color).hue);
+  });
+
+  it('负仰角（高山俯视云海）用指数延拓，不产生 NaN 或负值', () => {
+    const v = viewPathRgb(100, 900, 2000, 0.1, 1.3, 55, 300);
+    expect(Number.isFinite(v.airmass)).toBe(true);
+    expect(v.airmass).toBeGreaterThan(1);
+    expect(v.rgb.r).toBeGreaterThan(0);
+    expect(v.rgb.r).toBeLessThanOrEqual(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 21. 半拉格朗日平流插值（高空风场）
+// ═══════════════════════════════════════════════════════════════════════
+describe('平流插值：恢复被线性插值抹平的相位', () => {
+  // 构造一个"云正在到来"的序列：t=0 时 0%，t=+1h 时 100%
+  const T0 = Date.UTC(2026, 10, 3, 9, 0, 0);
+  const times = [T0 - 3600000, T0, T0 + 3600000, T0 + 2 * 3600000];
+  const ramp = [0, 0, 100, 100];
+
+  it('lag=0（无风）时严格退化为线性插值', () => {
+    const mid = T0 + 1800000; // 半小时处
+    expect(sampleAdvected(mid, times, ramp, 0)).toBeCloseTo(50, 6);
+  });
+
+  it('有平流滞后时，采样点上移（取到更早、更小的值）', () => {
+    const mid = T0 + 1800000;
+    const lagged = sampleAdvected(mid, times, ramp, 3600000); // 回看 1h
+    // 回看 1h 落在 T0-1800000，即 0 与 0 之间 → 0
+    expect(lagged).toBe(0);
+    expect(lagged).toBeLessThan(sampleAdvected(mid, times, ramp, 0));
+  });
+
+  it('平移越界时取边界值，不外推', () => {
+    // 回看 10h，远超序列起点
+    const v = sampleAdvected(T0 + 1800000, times, ramp, 10 * 3600000);
+    expect(v).toBe(ramp[0]);
+  });
+
+  it('空序列返回兜底值，不产生 NaN', () => {
+    expect(sampleAdvected(T0, [], [], 1000, -1)).toBe(-1);
+    expect(Number.isFinite(sampleAdvected(T0, times, ramp, 1800000))).toBe(true);
+  });
+
+  it('风向投影：顺风朝本地吹时才产生滞后', () => {
+    // 视线朝东（90°）。风吹向 90° = 来向 270°
+    const toward = advectionLagMs(270, 60, 90, 80);
+    expect(toward).toBeGreaterThan(0);
+    // 来向 90°（吹向 270°，即背离本地）不应产生滞后
+    expect(advectionLagMs(90, 60, 90, 80)).toBe(0);
+  });
+
+  it('风速越大滞后越短（云来得快）', () => {
+    // 注意必须选**不触 0.5h 上限**的风速：80km 环在 v>160km/h 时
+    // travelHours<0.5，否则两者都会被钳到 0.5h 而看起来相等。
+    const slow = advectionLagMs(270, 200, 90, 80); // 80/200 = 0.4h
+    const fast = advectionLagMs(270, 400, 90, 80); // 80/400 = 0.2h
+    expect(fast).toBeLessThan(slow);
+    expect(slow).toBeCloseTo(0.4 * 3600 * 1000, -3);
+    expect(fast).toBeCloseTo(0.2 * 3600 * 1000, -3);
+  });
+
+  it('滞后上限为半格（30min），不允许整格平移', () => {
+    // 风速极大 ⇒ travelHours→0，但无论如何不超过 0.5h
+    const lag = advectionLagMs(270, 1000, 90, 80);
+    expect(lag).toBeLessThanOrEqual(0.5 * 3600 * 1000);
+  });
+
+  it('无风 / 风向缺测时不产生滞后（行为不变）', () => {
+    expect(advectionLagMs(270, 0, 90, 80)).toBe(0);
+    expect(advectionLagMs(NaN, 60, 90, 80)).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 22. 晴空基线剥离：COT 反演必须只反映"云"的贡献
+// ═══════════════════════════════════════════════════════════════════════
+describe('COT 反演的晴空基线（实测发现的真实缺陷）', () => {
+  it('T_clear 落在实测回归值附近（442 个晴空样本）', () => {
+    // 实测 τ_clear·m = 0.1302 + 0.0970·AOD，RMSE 0.038
+    // 太阳 40°、AOD 0.2 → τ_clear≈0.150、m≈1.55 → T_clear≈0.79
+    const tClear = clearSkySwTransmittance(40, 0.2);
+    expect(tClear).toBeGreaterThan(0.70);
+    expect(tClear).toBeLessThan(0.88);
+  });
+
+  it('太阳越高 T_clear 越大（气柱越短）', () => {
+    const ts = [10, 20, 40, 70].map((a) => clearSkySwTransmittance(a, 0.15));
+    for (let i = 1; i < ts.length; i++) expect(ts[i]).toBeGreaterThan(ts[i - 1]);
+  });
+
+  it('AOD 越高 T_clear 越小（气溶胶消光）', () => {
+    expect(clearSkySwTransmittance(40, 0.8)).toBeLessThan(clearSkySwTransmittance(40, 0.1));
+  });
+
+  it('**核心回归**：晴空观测（T≈T_clear）必须返回 null，不得报出 τ=12', () => {
+    // 真实数据实测：太阳 35°、AOD 0.35、SW/TOA=0.515 且云量 0%
+    // 旧实现给出 τ=12.5（把大气本底当成了云）→ cotFactor 被放大 2 倍
+    const alt = 35;
+    const aod = 0.35;
+    const tClear = clearSkySwTransmittance(alt, aod);
+    // 构造一个"地面辐射恰好等于晴空预期"的观测
+    const toaW = 728;
+    const swW = toaW * tClear;
+    const tau = inferCloudOpticalDepthFromRadiation(swW, toaW, alt, aod);
+    expect(tau).toBeNull();
+    // 而裸反演（不剥离基线）会把大气本底当成云，给出一个假 τ —— 这就是被修掉的缺陷
+    const raw = inferCloudOpticalDepth(swW, toaW);
+    expect(raw).not.toBeNull();
+    expect(raw!).toBeGreaterThan(2);
+  });
+
+  it('有云时（SW 明显低于晴空预期）正常反演出 τ', () => {
+    const alt = 35;
+    const aod = 0.15;
+    const tClear = clearSkySwTransmittance(alt, aod);
+    const toaW = 800;
+    // 地面辐射只有晴空预期的一半 → 云遮蔽了一半
+    const swW = toaW * tClear * 0.5;
+    const tau = inferCloudOpticalDepthFromRadiation(swW, toaW, alt, aod);
+    expect(tau).not.toBeNull();
+    expect(tau!).toBeGreaterThan(5);
+    expect(tau!).toBeLessThan(60);
+  });
+
+  it('地面辐射超过晴空预期（反射云/模式不一致）时返回 null，不硬算', () => {
+    const alt = 30;
+    const aod = 0.1;
+    const tClear = clearSkySwTransmittance(alt, aod);
+    const toaW = 700;
+    const swW = toaW * tClear * 1.3; // 比晴空还亮 30%
+    expect(inferCloudOpticalDepthFromRadiation(swW, toaW, alt, aod)).toBeNull();
+  });
+
+  it('太阳太低（无法算晴空基线）时返回 null', () => {
+    expect(inferCloudOpticalDepthFromRadiation(10, 100, 0.2, 0.1)).toBeNull();
+    expect(inferCloudOpticalDepthFromRadiation(10, 100, 4.9, 0.1)).toBeNull();
   });
 });

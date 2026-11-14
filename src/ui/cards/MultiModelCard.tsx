@@ -3,6 +3,9 @@ import { VIVIDNESS_CEILING } from '../../engine/constants';
 import type { ModelId, SunsetPredictionOutput } from '../../engine/types';
 import { Dot, InfoTip, Panel } from '../primitives';
 
+/** 截断到 [0,1]，用于横轴映射 —— 保证坐标永不越界 */
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
 /**
  * 多模型交叉验证：分歧度、各源峰值、置信度带。
  */
@@ -31,28 +34,34 @@ export function MultiModelCard({
       className="col-span-full sm:col-span-6 lg:col-span-3 xl:col-span-2"
       title="多模型交叉验证"
       subtitle={`${agreeLabel} · 分歧 ${(p.uncertainty * 100).toFixed(0)}%`}
-      right={<InfoTip text="分歧度 =（各源峰值极差）/（均值）。分歧越大，预报不确定性越高，摄影师应准备更宽的曝光/焦段冗余，并在临场根据实况微调。" />}
+      right={<InfoTip text="分歧度 = 峰值极差 /（峰值极差 + 0.55），再与数据完整度合成为不确定性。分歧越大，预报不确定性越高，摄影师应准备更宽的曝光/焦段冗余，并在临场根据实况微调。" />}
       bodyClass="!pt-0"
     >
       {/* 一致性条 */}
+      {/*
+        横轴原点必须是 **0**，与左下角刻度标着「0」严格一致。
+        上一版用 `(v − 0.1) / (CEILING − 0.1)`：峰值 < 0.1 的模型会映射到
+        负坐标，被 `overflow-hidden` 直接裁掉（圆点消失），而刻度仍写着 0 ——
+        "无烧"的日子恰好是峰值最低的场景，最需要看到的那三个点反而全部不可见。
+      */}
       <div className="relative mt-1 h-9 w-full overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.025]">
         {/* 均值±极差带 */}
         <div
           className="absolute inset-y-0 opacity-25"
           style={{
-            left: `${((min - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100}%`,
-            width: `${(Math.max(spread, 0.02) / (VIVIDNESS_CEILING - 0.1)) * 100}%`,
+            left: `${(Math.max(min - spread / 2, 0) / VIVIDNESS_CEILING) * 100}%`,
+            width: `${(Math.min(Math.max(spread, 0.02), VIVIDNESS_CEILING) / VIVIDNESS_CEILING) * 100}%`,
             background: `linear-gradient(90deg, ${agreeColor}00, ${agreeColor}, ${agreeColor}00)`,
           }}
         />
         {/* 均值线 */}
         <div
           className="absolute inset-y-0 w-px bg-white/45"
-          style={{ left: `${((mean - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100}%` }}
+          style={{ left: `${(clamp01(mean / VIVIDNESS_CEILING)) * 100}%` }}
         />
         {/* 各模型点 */}
         {peaks.map((m) => {
-          const x = Math.max(2, Math.min(98, ((m.peakVividness - 0.1) / (VIVIDNESS_CEILING - 0.1)) * 100));
+          const x = clamp01(m.peakVividness / VIVIDNESS_CEILING) * 100;
           const isPrimary = m.model === p.primaryModel;
           return (
             <button

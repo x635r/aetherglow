@@ -31,7 +31,7 @@ export function CloudProfileCard({ p }: { p: SunsetPredictionOutput }) {
     <Panel
       className="col-span-full sm:col-span-6 lg:col-span-3 xl:col-span-2"
       title="垂直云层剖面"
-      subtitle="925 → 300hPa"
+      subtitle="1000 → 200hPa"
       right={<InfoTip text="柱高 = 该等压面位势高度；柱宽/填充 = 云量；高亮部分 = 此刻处于受光面的比例。黄金层（600/500hPa）是火烧云主战场。" />}
       bodyClass="!pt-0"
     >

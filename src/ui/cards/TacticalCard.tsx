@@ -17,12 +17,19 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   const { query, setObserverHeight, resetObserverHeight } = useStore();
   const h = query.observerHeightM;
 
+  // 低云**底**与低云**顶**是两个不同的高度，不能混用。
+  //
+  // 上一版取 `min(925hPa, 850hPa)`（≈780m）却把结果叫「低云顶」：
+  // 925hPa 是云底参照，850hPa 才是云顶参照。判"机位是否越过云层"
+  // 必须比云顶，否则会提示用户"还没越过"而其实早已在云上。
   const lowBase = useMemo(() => {
-    // 用 925/850 层高度做低云参考（MSL）
     const l925 = p.layers.find((l) => l.key === '925')?.altitudeM ?? 780;
-    const l850 = p.layers.find((l) => l.key === '850')?.altitudeM ?? 1500;
-    return Math.min(l925, l850);
+    return l925;
   }, [p.layers]);
+  const lowTop = useMemo(() => {
+    const l850 = p.layers.find((l) => l.key === '850')?.altitudeM ?? 1500;
+    return Math.max(lowBase, l850);
+  }, [p.layers, lowBase]);
 
   // **必须用 MSL 比较，不能用 AGL**。
   // 上一版写的是 `h > lowBase`（AGL 对 MSL），于是拉萨这类高原城市
@@ -129,7 +136,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
           {hasLowCloud && !p.cloudSeaReversal && h >= 900 && (
             <StatusLine
               ok={false}
-              text={`尚未越过低云顶（约 ${Math.round(lowBase)}m），继续抬高可触发云海成效`}
+              text={`尚未越过低云顶（约 ${Math.round(lowTop)}m，850hPa 参考），继续抬高可触发云海成效`}
               accent="#8ea0b8"
             />
           )}
@@ -186,7 +193,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
       <div className="mt-2 flex items-start gap-1.5 text-[10px] leading-snug text-slate-500">
         <span className="mt-0.5 shrink-0 text-amber-300/70">※</span>
         <span className="break-anywhere">
-          {p.tactical.isoHint} 低云顶约 {Math.round(lowBase)}m（{LEVEL_BY_KEY['850'].hpa}hPa 参考）。
+          {p.tactical.isoHint} 低云底约 {Math.round(lowBase)}m（925hPa）、云顶约 {Math.round(lowTop)}m（850hPa）。
         </span>
       </div>
     </Panel>

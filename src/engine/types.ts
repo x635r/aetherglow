@@ -38,6 +38,39 @@ export interface HourlySample {
    * 实测 ECMWF 19.9 / GFS 20.3 kg/m²，ICON 不提供。
    */
   totalColumnWaterVapour?: number;
+  /**
+   * 地面短波总辐射 W/m²（direct + diffuse 的向下总量，含散射）。
+   * 与 `terrestrialRadiation` 相除即得整层短波透射率。
+   */
+  shortwaveRadiation?: number;
+  /**
+   * **大气顶**短波辐照 W/m²（只由太阳位置决定，含日地距离修正，不含云）。
+   *
+   * 这是免费拿到真实云光学厚度的关键：`SW / TOA` 就是整层短波透射率，
+   * 反解两流近似即可得到当日实际 COT —— 补上「只有云覆盖率、
+   * 没有云厚薄」这个本引擎最大的数据缺口。
+   */
+  terrestrialRadiation?: number;
+  /**
+   * 对流有效位能 J/kg。
+   *
+   * 高 CAPE + 强降水 = 深对流积雨云，是不透明的黑幕而非画布。
+   * 用来区分「层状云画布」与「对流云黑幕」—— 单看云量无法区分。
+   */
+  cape?: number;
+  /**
+   * 高空风（700/500/300 hPa）—— 用于**半拉格朗日平流插值**。
+   *
+   * 云场是被风平移输运的，逐点线性插值会把"云还没到"与"云已走"
+   * 平均成一片均匀云，抹平峰值时刻并漂移云洞位置。有了高空风，
+   * 就能把上游的云量平移到当前时刻，恢复相位信息。
+   */
+  windSpeed700?: number;
+  windDir700?: number;
+  windSpeed500?: number;
+  windDir500?: number;
+  windSpeed300?: number;
+  windDir300?: number;
   cloudLow: number;
   cloudMid: number;
   cloudHigh: number;
@@ -107,6 +140,21 @@ export interface ForecastBundle {
   fetchedAt: number;
   apiCalls: number;
   cached: boolean;
+  /**
+   * 地形数据是否**真实可用**。
+   *
+   * 不能靠 `terrain.some(t => t.elevationM > 0)` 判断 —— 沿海城市（海拔
+   * 恰好 0m）会被永久判为缺测，`completeness` 白扣 8 分。数据层按 API
+   * 响应状态直接标记，引擎只读标记。
+   */
+  terrainAvailable?: boolean;
+  /**
+   * 位势高度是否为**真实探空/模式值**（而非由地面气压反演的标称值）。
+   *
+   * 同理不能用 `|h − nominal| > 1` 判断：真实探空若恰好接近标准大气高度
+   * （例如 500hPa 真是 5560m），会被误判为"退回标称值"。
+   */
+  gphAvailable?: boolean;
 }
 
 export interface TimeSample {
