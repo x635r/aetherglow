@@ -31,6 +31,10 @@ export interface SectionInput {
   focusLevel: LevelKey;
   /** 视觉曲率放大倍率 */
   curvatureGain?: number;
+  /** 与主评分同源的整场 COT 乘子（来自 prediction.debug.cotFactor） */
+  cotFactor?: number;
+  /** 太阳方位角 —— 云量平流修正需与主评分一致 */
+  sightAzimuthDeg?: number;
 }
 
 export interface HitRegion {
@@ -63,7 +67,10 @@ export function renderSection(
 ): HitRegion[] {
   const { bundle, model, timeMs, sunAltitudeDeg, observerHeightM, focusLevel } = input;
   const gain = input.curvatureGain ?? 6.5;
-  const section = buildCrossSection(bundle, model, timeMs, sunAltitudeDeg, observerHeightM, focusLevel);
+  const section = buildCrossSection(bundle, model, timeMs, sunAltitudeDeg, observerHeightM, focusLevel, {
+    cotFactor: input.cotFactor,
+    sightAzimuthDeg: input.sightAzimuthDeg,
+  });
 
   const padL = width < 520 ? 42 : 56;
   const padR = width < 520 ? 12 : 20;
@@ -477,8 +484,11 @@ export function renderSection(
   }
 
   // ══ 9. 观测者 ═════════════════════════════════════════════════════════
+  // y 轴是 MSL 海拔，观测者必须画在「地面 DEM + AGL」（= section.observerMslM）。
+  // 上一版直接用 AGL —— 高原城市（地面 3650m、机位 0m AGL）会被画到
+  // 海平面上，视觉上比 780m 的低云还低 2.8km（审查 P2）。
   const ox = xOf(0);
-  const oy = yOf(observerHeightM + curvature(0));
+  const oy = yOf(section.observerMslM + curvature(0));
   ctx.beginPath();
   ctx.moveTo(ox, oy - 9);
   ctx.lineTo(ox - 6, oy + 1);
@@ -489,7 +499,7 @@ export function renderSection(
   ctx.strokeStyle = 'rgba(10, 8, 4, 0.7)';
   ctx.lineWidth = 1;
   ctx.stroke();
-  hits.push({ kind: 'observer', x: ox, y: oy, label: `观测者 ${Math.round(observerHeightM)}m AGL` });
+  hits.push({ kind: 'observer', x: ox, y: oy, label: `观测者 ${Math.round(section.observerMslM)}m MSL（机位 ${Math.round(observerHeightM)}m AGL）` });
 
   ctx.restore();
 

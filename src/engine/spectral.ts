@@ -78,9 +78,11 @@ export function evaluateSpectral(
   /** 该臭氧值是否为实测 */
   ozoneMeasured = false,
 ): SpectralReport {
-  const hasAerosol = aerosolAvailable && Number.isFinite(aod) && aod > 0;
+  // AOD = 0 是**合法测量值**（极地/高空洁净大气），不是缺测。
+  // 缺测只能由 `aerosolAvailable=false` 表达，不能用数值大小推断。
+  const hasAerosol = aerosolAvailable && Number.isFinite(aod) && aod >= 0;
 
-  const A = clamp(Number.isFinite(aod) ? aod : 0.22, 0.01, 3.0);
+  const A = clamp(Number.isFinite(aod) ? aod : 0.22, 0, 3.0);
   const PM = clamp(Number.isFinite(pm25) ? pm25 : 20, 0, 900);
   const DU = clamp(Number.isFinite(dust) ? dust : 10, 0, 3000);
   const RH = clamp(Number.isFinite(humidity) ? humidity : 55, 1, 100);
@@ -113,7 +115,7 @@ export function evaluateSpectral(
   hazePenalty *= 0.55 + 0.45 * visFactor;
   hazePenalty = clamp(hazePenalty, 0.06, 1);
 
-  // ── AOD 硬门槛：「污烧」上限 ──
+  // ── AOD 浑浊上限：连续 logistic（取代 0.8 硬门槛）──
   //
   // SunsetBot 教程表 2.3 的分档是行业事实标准：
   //   0–0.1   低于瑞利光学厚度 → 水晶天
@@ -123,17 +125,18 @@ export function evaluateSpectral(
   //   0.5–0.8 气溶胶偏多 → **明显削弱火烧云**
   //   >0.8    重度霾/沙尘 → **「污烧」：灰白，再大的云也救不回来**
   //
-  // 这是一条**硬规则**而不是连续惩罚：>0.8 时无论云幕多好，产物都是
-  // 灰白的"污烧"，鲜艳度必须被压到显著低于「大烧」门槛（0.6）。
-  // 实测表明这一条就能复现 SunsetBot 的大部分技能。
-  if (hasAerosol && A > 0.8) {
-    // 0.8 → 0.34（仍可辨认的弱烧），1.2+ → 0.12（几乎纯灰）
-    const severity = clamp((A - 0.8) / 0.4, 0, 1);
-    hazePenalty = Math.min(hazePenalty, 0.34 - 0.22 * severity);
-  } else if (hasAerosol && A > 0.5) {
-    // 0.5–0.8：明显削弱但未到污烧
-    const t = (A - 0.5) / 0.3;
-    hazePenalty = Math.min(hazePenalty, 1 - 0.5 * t);
+  // 这些分档**保留为天气类型标签**（见下方 tone 判定），但物理分数不能
+  // 在无限小输入变化下跳变：旧的 `A > 0.8` 硬分支让 AOD 从 0.800000 增到
+  // 0.800001 时 hazePenalty 从 0.4754 断崖到 0.3400（−28.5%，探针实测）。
+  // 任何实测都不会有这种跳变 —— 它是实现产物，不是大气物理。
+  //
+  // 改为连续 logistic 上限：洁净端趋近 1，AOD≈0.9 时已压到约 0.30，
+  // 高污染端渐近到 0.12；不再让分类边界控制数值分支。
+  if (hasAerosol) {
+    // 上限只负责表达重霾的渐近压制：0.82 附近进入污烧区，洁净端趋近 1。
+    // 天气类型仍可沿用 0.8 的离散标签，但数值不得随标签跨档而跳变。
+    const hazeCap = 0.12 + 0.88 / (1 + Math.exp((A - 0.82) / 0.06));
+    hazePenalty = Math.min(hazePenalty, hazeCap);
   }
 
   // 气溶胶缺测时：按**气候学中值**给一个轻微的保守惩罚，而不是完全中性。
@@ -152,23 +155,36 @@ export function evaluateSpectral(
   const crystalEligible = hasAerosol && A < 0.18 && VIS > 20 && DU < 40 && PM < 25;
   const cleanEligible = hasAerosol && !crystalEligible && A < 0.28 && VIS > 15;
 
+  const smooth01 = (x: number): number => {
+    const t = clamp(x, 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+
   let saturationGain: number;
   if (!hasAerosol) {
     // 气溶胶数据缺失：给中性值，不加成也不惩罚，绝不容忍"越缺数据越乐观"
     saturationGain = 1.0;
-  } else if (crystalEligible) {
-    // 雨后初晴：短波被彻底散射掉，红光纯度最大
-    saturationGain = 1.25 + clamp((0.18 - A) / 0.18, 0, 1) * 0.06;
-  } else if (cleanEligible) {
-    saturationGain = 1.12 + clamp((0.28 - A) / 0.28, 0, 1) * 0.05;
   } else {
-    // 常规：AOD 越高越灰，湿霾再压一击
+    // 连续基底 + 连续洁净增益。旧实现把 crystal / clean / normal 三档直接
+    // 映射到不同公式，导致 AOD=0.18、0.28 以及 RH=80 处出现人为台阶。
+    // 标签分档仍保留给 UI，所有进入评分的数值都在这里平滑过渡。
     saturationGain = clamp(1.02 - Math.max(0, A - 0.28) * 0.85, 0.42, 1.06);
-    if (A > 0.5 && RH > 80) {
-      // 雾霾 + 高湿 → 指数级惩罚
-      saturationGain *= Math.exp(-0.55 * clamp((A - 0.5) / 0.5, 0, 1.2));
-    }
-    if (PM > 75 && RH > 80) saturationGain *= Math.exp(-0.35 * clamp((PM - 75) / 120, 0, 1.5));
+    const cleanBoost =
+      0.25 *
+      (1 - smooth01((A - 0.12) / 0.22)) *
+      smooth01((VIS - 12) / 12) *
+      (1 - smooth01((PM - 20) / 40)) *
+      (1 - smooth01((DU - 30) / 60));
+    saturationGain += cleanBoost;
+
+    // 高湿只增强已有的霾/PM 惩罚；用 smoothstep 渐入，不在 RH=80 突然启用。
+    const humidActivation = smooth01((RH - 70) / 20);
+    saturationGain *= Math.exp(
+      -0.55 * clamp((A - 0.5) / 0.5, 0, 1.2) * humidActivation,
+    );
+    saturationGain *= Math.exp(
+      -0.35 * clamp((PM - 75) / 120, 0, 1.5) * humidActivation,
+    );
   }
   saturationGain = clamp(saturationGain, 0.32, 1.34);
 
@@ -196,7 +212,7 @@ export function evaluateSpectral(
     toneLabel = '污烧';
     detail = `AOD ${A.toFixed(
       2,
-    )} 已越过 0.8 硬门槛 —— 按行业口径这是「污烧」：米氏散射把直射光整体洗灰，再好的云幕也只能烧出灰白色，不是绯红。`;
+    )} 已超过 0.8 的污烧参考线：米氏散射把直射光整体洗灰，再好的云幕也只能烧出灰白色，不是绯红。`;
   } else if (hazePenalty < 0.62) {
     tone = 'hazy';
     toneLabel = '雾霾浑浊';

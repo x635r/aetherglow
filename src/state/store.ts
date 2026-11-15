@@ -112,7 +112,11 @@ export const useStore = create<Store>((set, get) => ({
   setQuery: (patch) => {
     const prev = get().query;
     const next = { ...prev, ...patch };
-    set({ query: next });
+    // 换日期/模式/地点都要丢弃旧臭氧（审查 P2）：
+    // 臭氧是按「地点 + 事件时刻」取的，换日期后旧柱量属于另一天。
+    // （setPoint 已单独处理 point；这里覆盖 dateISO/mode 的路径。）
+    const dropOzone = patch.point || patch.dateISO || patch.mode;
+    set((s) => ({ query: next, ozoneDu: dropOzone ? null : s.ozoneDu }));
     if (
       patch.point ||
       patch.dateISO ||
@@ -201,6 +205,10 @@ export const useStore = create<Store>((set, get) => ({
         signal: ac.signal,
       });
       const resolved = resolveEvent(query.point, query.dateISO, query.mode);
+      // 竞态守卫（审查 P2）：abort 只能打断**还在等待**的请求；
+      // 若旧请求在 abort 前已 resolve（或数据层某处丢了 signal），
+      // 它仍会走到这里 —— 不写序号检查就会让旧城市的结果覆盖新城市。
+      if (mySeq !== loadSeq) return;
       set({
         bundle: res.bundle,
         tzOffsetSeconds: res.tzOffsetSeconds,

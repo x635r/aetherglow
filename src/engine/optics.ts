@@ -927,10 +927,10 @@ export function viewPathRgb(
  *
  * 所以返回两个量：
  *  · `color`   —— 联合透过率的 RGB（用于色相/饱和度）
- *  · `intensity` —— Path 1 的亮度（用于"亮不亮"）
+ *  · `intensity` —— 联合透过率的实际亮度（Path 1 × Path 2）
  *
- * 高云在很远的距离上时 `color` 会明显偏红（Path 2 抽掉蓝光），
- * 而 `intensity` 由 Path 1 单独决定 —— 这两件事在物理上是解耦的。
+ * 高云在很远的距离上时 `color` 会明显偏红，同时 Path 2 也会降低到达
+ * 观测者的亮度。颜色与亮度使用同一份合成 RGB，避免显示颜色和评分各走一路。
  */
 export function compositeCloudColor(
   sunRgb: RgbColor,
@@ -941,7 +941,7 @@ export function compositeCloudColor(
     g: sunRgb.g * viewRgb.g,
     b: sunRgb.b * viewRgb.b,
   };
-  const intensity = 0.2126 * sunRgb.r + 0.7152 * sunRgb.g + 0.0722 * sunRgb.b;
+  const intensity = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
   return { color, intensity };
 }
 

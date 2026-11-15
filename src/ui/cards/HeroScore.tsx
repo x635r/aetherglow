@@ -147,20 +147,26 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
                     p.dual.ensemble.probability * 100,
                   )}% 落在「能烧」区间。成员强度 p10/p50/p90 = ${p.dual.ensemble.p10.toFixed(
                     2,
-                  )} / ${p.dual.ensemble.p50.toFixed(2)} / ${p.dual.ensemble.p90.toFixed(
-                    2,
-                  )}。成员峰值时刻分散在 ${p.dual.ensemble.peakOffsetP10}~${p.dual.ensemble.peakOffsetP90} 分钟（中位 ${p.dual.ensemble.peakOffsetP50}）—— 分散越窄说明时间窗越确定。`}
+                  )} / ${p.dual.ensemble.p50.toFixed(2)} / ${p.dual.ensemble.p90.toFixed(2)}。${
+                    Number.isFinite(p.dual.ensemble.peakOffsetP50)
+                      ? `成员峰值时刻分散在 ${p.dual.ensemble.peakOffsetP10}~${p.dual.ensemble.peakOffsetP90} 分钟（中位 ${p.dual.ensemble.peakOffsetP50}）—— 分散越窄说明时间窗越确定。`
+                      : '所有成员均未出现可分辨的峰值（全体晴空），无峰值时刻分布。'
+                  }`}
                 >
                   集合 {Math.round(p.dual.ensemble.probability * 100)}% · n={p.dual.ensemble.members}
-                  <br />
-                  峰值 {p.dual.ensemble.peakOffsetP50 >= 0 ? '+' : ''}
-                  {p.dual.ensemble.peakOffsetP50}′
-                  <span className="text-white/30">
-                    {' '}
-                    ({p.dual.ensemble.peakOffsetP10 >= 0 ? '+' : ''}
-                    {p.dual.ensemble.peakOffsetP10}~{p.dual.ensemble.peakOffsetP90 >= 0 ? '+' : ''}
-                    {p.dual.ensemble.peakOffsetP90})
-                  </span>
+                  {Number.isFinite(p.dual.ensemble.peakOffsetP50) && (
+                    <>
+                      <br />
+                      峰值 {p.dual.ensemble.peakOffsetP50 >= 0 ? '+' : ''}
+                      {p.dual.ensemble.peakOffsetP50}′
+                      <span className="text-white/30">
+                        {' '}
+                        ({p.dual.ensemble.peakOffsetP10 >= 0 ? '+' : ''}
+                        {p.dual.ensemble.peakOffsetP10}~{p.dual.ensemble.peakOffsetP90 >= 0 ? '+' : ''}
+                        {p.dual.ensemble.peakOffsetP90})
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
             </div>

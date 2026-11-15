@@ -6,7 +6,8 @@
  * 为什么值得做：此前 `dual.burnProbability` 是对单个确定性预报做一条逻辑斯蒂
  * 曲线得到的启发式映射（`calibration = 0`）。集合预报给出的是完全不同性质的量：
  * 50 个扰动初值/物理过程成员各自跑一遍，**落在"能烧"区间的成员比例**
- * 就是一条有物理依据的概率，不需要任何标定。
+ * 给出一个有物理依据的原始集合频率；它仍需用独立观测做可靠性校准，
+ * 不能直接宣称为现实世界的准确概率。
  *
  * 实现要点：
  *  · 只取近场 3 环（0/30/80km）—— 烧不烧主要由头顶和近处云幕决定，
@@ -139,6 +140,9 @@ export interface EnsembleProbability {
    * 这对摄影决策比"概率"更直接：如果成员们的峰值时刻集中在 −4~+2 分钟，
    * 说明时间窗很确定；如果分散在 −18~+30，说明云场演化不确定，
    * 摄影师应该更早到场并多待一会儿。
+   *
+   * 只统计**真的出现过可分辨峰值**（peak > 0）的成员；全体晴空时
+   * 三者均为 NaN，UI 应隐藏该行（绝不显示伪造的 0 偏移）。
    */
   peakOffsetP10: number;
   peakOffsetP50: number;
@@ -200,8 +204,11 @@ const ENS_ROLE_WEIGHT = { low: 0.10, mid: 0.24, golden: 0.66, high: 0.46 } as co
  *
  * 刻意省略：光路逐环积分、光谱、地形、云墙。这些在 50 个成员上太贵，
  * 且对"会不会烧"这个二元问题的边际贡献远小于云量本身。
+ *
+ * **必须 export**：测试直接复用这份生产实现，不允许在测试里复制一份
+ * （上一版复制件与生产代码漂移后仍在用旧的独立并集公式）。
  */
-function memberScore(
+export function memberScore(
   low: number,
   mid: number,
   high: number,
@@ -302,7 +309,10 @@ export async function fetchEnsembleProbability(
   } catch {
     /* 无缓存也能跑 */
   }
-  const existing = ensInflight.get(cacheKey);
+  // 与主数据请求一致：可取消调用不共享 Promise，避免一次取消连带中止
+  // 其他查询；无 signal 的重复调用仍可安全复用昂贵的集合请求。
+  const shared = !signal;
+  const existing = shared ? ensInflight.get(cacheKey) : undefined;
   if (existing) return existing;
 
   const task = (async (): Promise<EnsembleProbability | null> => {
@@ -316,11 +326,11 @@ export async function fetchEnsembleProbability(
     }
     return result;
   })();
-  ensInflight.set(cacheKey, task);
+  if (shared) ensInflight.set(cacheKey, task);
   try {
     return await task;
   } finally {
-    ensInflight.delete(cacheKey);
+    if (shared && ensInflight.get(cacheKey) === task) ensInflight.delete(cacheKey);
   }
 }
 
@@ -402,6 +412,19 @@ async function fetchEnsembleProbabilityUncached(
   const times = hourly.time.map((t) => isoToUtcMs(t, offset)).filter(Number.isFinite);
   if (!times.length) return null;
 
+  // **每环必须用自己的时间轴**（审查 P1）：`timezone: 'auto'` 下各环按
+  // 当地时区返回本地时间串与各自的 `utc_offset_seconds`。上一版所有环
+  // 都复用首环的 times —— 环跨时区时（450km 可跨 1 个时区）远端云场
+  // 被整体平移 1 小时，黄昏窗口完全错位。
+  const timesPerRing: number[][] = ENS_RINGS.map((_, ri) => {
+    const resp = arr[ri] as { hourly?: EnsHourly; utc_offset_seconds?: number } | undefined;
+    const h = resp?.hourly;
+    if (!h || !Array.isArray(h.time)) return times; // 缺环：时间轴占位，序列全 NaN 后成员会被判不可用
+    const off = Number.isFinite(resp?.utc_offset_seconds) ? (resp!.utc_offset_seconds as number) : offset;
+    const ts = h.time.map((t) => isoToUtcMs(t, off)).filter(Number.isFinite);
+    return ts.length ? ts : times;
+  });
+
   // 找出成员编号
   const memberIds = new Set<string>();
   for (const k of Object.keys(hourly)) {
@@ -414,11 +437,12 @@ async function fetchEnsembleProbabilityUncached(
   const seriesOf = (base: string, member: string, ringIdx: number): number[] => {
     const resp = arr[ringIdx] as { hourly?: EnsHourly } | undefined;
     const h = resp?.hourly;
-    if (!h) return times.map(() => Number.NaN);
+    const axis = timesPerRing[ringIdx] ?? times;
+    if (!h) return axis.map(() => Number.NaN);
     const key = `${base}_member${member}`;
     const a = h[key] ?? h[base];
-    if (!Array.isArray(a)) return times.map(() => Number.NaN);
-    return times.map((t, i) => {
+    if (!Array.isArray(a)) return axis.map(() => Number.NaN);
+    return axis.map((_t, i) => {
       const v = (a as Array<number | null>)[i];
       return typeof v === 'number' && Number.isFinite(v) ? v : Number.NaN;
     });
@@ -485,9 +509,10 @@ async function fetchEnsembleProbabilityUncached(
       let usable = true;
       for (let ri = 0; ri < ENS_RINGS.length; ri++) {
         const s = perRing[ri];
-        const vLow = interp(times, s.low, t);
-        const vMid = interp(times, s.mid, t);
-        const vHigh = interp(times, s.high, t);
+        const tx = timesPerRing[ri] ?? times;
+        const vLow = interp(tx, s.low, t);
+        const vMid = interp(tx, s.mid, t);
+        const vHigh = interp(tx, s.high, t);
         if (!Number.isFinite(vLow) || !Number.isFinite(vMid) || !Number.isFinite(vHigh)) {
           usable = false;
           break;
@@ -495,9 +520,9 @@ async function fetchEnsembleProbabilityUncached(
         low += (vLow / 100) * ringW[ri];
         mid += (vMid / 100) * ringW[ri];
         high += (vHigh / 100) * ringW[ri];
-        const vDir = interp(times, s.direct, t);
-        const vDif = interp(times, s.diffuse, t);
-        const vPre = interp(times, s.precip, t);
+        const vDir = interp(tx, s.direct, t);
+        const vDif = interp(tx, s.diffuse, t);
+        const vPre = interp(tx, s.precip, t);
         direct += (Number.isFinite(vDir) ? vDir : 0) * ringW[ri];
         diffuse += (Number.isFinite(vDif) ? vDif : 0) * ringW[ri];
         precip += (Number.isFinite(vPre) ? vPre : 0) * ringW[ri];
@@ -530,7 +555,10 @@ async function fetchEnsembleProbabilityUncached(
     // 关键：**任何**有过有效时刻的成员都计入分母，peak=0 也要计入
     if (hasValidTimeStep) {
       peakScores.push(peak);
-      peakOffsets.push(peakOffset);
+      // 峰值时刻分布只统计**真的出现过最亮时刻**的成员（审查 P1）：
+      // peak=0 的成员每一帧都是 0，argmax 是构造产物（恒为窗口起点），
+      // 把它计入会让分布在中部凭空堆出一根假峰。
+      if (peak > 0) peakOffsets.push(peakOffset);
     } else {
       unusableMembers++;
     }
@@ -547,7 +575,12 @@ async function fetchEnsembleProbabilityUncached(
   const qtl = (p: number) => sortedPeaks[Math.min(sortedPeaks.length - 1, Math.floor(p * sortedPeaks.length))];
 
   const sortedOffsets = [...peakOffsets].sort((a, b) => a - b);
-  const oq = (p: number) => sortedOffsets[Math.min(sortedOffsets.length - 1, Math.floor(p * sortedOffsets.length))];
+  // 没有任何成员出现过可分辨峰值（全体晴空）时，时刻分布不存在 → NaN，
+  // 由 UI 隐藏该行，绝不编一个 0 出来。
+  const oq = (p: number) =>
+    sortedOffsets.length
+      ? sortedOffsets[Math.min(sortedOffsets.length - 1, Math.floor(p * sortedOffsets.length))]
+      : Number.NaN;
 
   // "能烧"门槛。
   //

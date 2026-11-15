@@ -45,7 +45,8 @@ const GRADE_ALIASES: Record<string, GradeKey> = {
   moderate: 'moderate', '中烧': 'moderate', '小到中烧': 'moderate', '3': 'moderate',
   moderateplus: 'moderatePlus',
   'moderate-to-major': 'majorLow',
-  majordlow: 'majorLow',
+  majorlow: 'majorLow',
+  majordlow: 'majorLow', // 兼容历史误拼写
   '中到大烧': 'majorLow',
   major: 'major', '大烧': 'major', '4': 'major',
   extreme: 'extreme', '特大烧': 'extreme', '5': 'extreme',
@@ -241,6 +242,59 @@ export function confusionMatrix(
   return { raw, colNorm, rowNorm };
 }
 
+/** 终端对齐：CJK 字符占两个显示列，String.padStart 会把它们当 1 列 */
+function displayWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) w += (ch.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+  return w;
+}
+function padStartDisplay(s: string, n: number): string {
+  const d = n - displayWidth(s);
+  return d > 0 ? ' '.repeat(d) + s : s;
+}
+function padEndDisplay(s: string, n: number): string {
+  const d = n - displayWidth(s);
+  return d > 0 ? s + ' '.repeat(d) : s;
+}
+
+/**
+ * 按**日期**分组的 k 折交叉验证（审查 P1）。
+ *
+ * 在全样本上选 TSS 最优阈值、再在全样本上报这个 TSS，是教科书式的
+ * 过拟合 —— Skyglow 的教训正是"训练集 AUC 0.85、留出集 0.797"。
+ *
+ * 分组必须按日期：同一地点相邻日期的云场强相关，随机打散会把
+ * "几乎同一天"同时放进训练折和测试折，留出误差虚低。
+ *
+ * @returns 每折一行（阈值在训练折上选、TSS 在两侧各报一次）；
+ *          不同日期数 < 3 时返回 null（做不了交叉验证）。
+ */
+export function dateGroupedCV(
+  dates: string[],
+  preds: number[],
+  obs: number[],
+  k = 5,
+): Array<{ fold: number; trainN: number; testN: number; threshold: number; tssTrain: number; tssTest: number }> | null {
+  const uniq = [...new Set(dates)].sort();
+  if (uniq.length < 3) return null;
+  const kk = Math.min(k, uniq.length);
+  // 按日期排序后**连续**切块（不打乱）：保留时间邻接结构，
+  // 留出折始终是一段"未来的日子"。
+  const foldOf = new Map(uniq.map((d, i) => [d, Math.floor((i * kk) / uniq.length)]));
+  const rows: Array<{ fold: number; trainN: number; testN: number; threshold: number; tssTrain: number; tssTest: number }> = [];
+  for (let f = 0; f < kk; f++) {
+    const trP: number[] = [], trO: number[] = [], teP: number[] = [], teO: number[] = [];
+    for (let i = 0; i < preds.length; i++) {
+      if (foldOf.get(dates[i]) === f) { teP.push(preds[i]); teO.push(obs[i]); }
+      else { trP.push(preds[i]); trO.push(obs[i]); }
+    }
+    if (!teP.length || !trP.length) continue;
+    const bt = bestTss(trP, trO);
+    rows.push({ fold: f, trainN: trP.length, testN: teP.length, threshold: bt.threshold, tssTrain: bt.tss, tssTest: tss(teP, teO, bt.threshold) });
+  }
+  return rows.length ? rows : null;
+}
+
 // ── CSV 读取 ────────────────────────────────────────────────────────────
 
 export function parseLabels(csv: string): LabelRow[] {
@@ -270,6 +324,21 @@ export function parseLabels(csv: string): LabelRow[] {
   return rows;
 }
 
+/** 把离散别名或 0–1 连续标签统一为有序尺度，同时保留连续值供 Spearman 使用。 */
+export function normalizeObservedLabel(label: string): { index: number; ordinal: number } | null {
+  const text = label.trim();
+  if (!text) return null;
+  const gradeKey = GRADE_ALIASES[text.toLowerCase()] ?? GRADE_ALIASES[text];
+  if (gradeKey) {
+    const index = GRADE_INDEX[gradeKey];
+    return { index, ordinal: index };
+  }
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 1) return null;
+  const ordinal = numeric * 6;
+  return { index: Math.min(6, Math.max(0, Math.round(ordinal))), ordinal };
+}
+
 // ── 主流程 ──────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -294,11 +363,13 @@ async function main(): Promise<void> {
 
   const preds: Prediction[] = [];
   const obsIdx: number[] = [];
+  // 秩相关保留连续观测强度；obsIdx 的离散副本只用于分类与混淆矩阵。
+  const obsOrdinal: number[] = [];
   const skipped: string[] = [];
 
   for (const row of rows) {
-    const gradeKey = GRADE_ALIASES[row.label.toLowerCase()] ?? GRADE_ALIASES[row.label];
-    if (!gradeKey) {
+    const normalized = normalizeObservedLabel(row.label);
+    if (!normalized) {
       skipped.push(`${row.date} 无法识别的标签 "${row.label}"`);
       continue;
     }
@@ -332,7 +403,8 @@ async function main(): Promise<void> {
         vividness: p.vividness,
         model,
       });
-      obsIdx.push(GRADE_INDEX[gradeKey]);
+      obsIdx.push(normalized.index);
+      obsOrdinal.push(normalized.ordinal);
     } catch (e) {
       skipped.push(`${row.date} 预测失败: ${(e as Error).message}`);
     }
@@ -368,23 +440,44 @@ async function main(): Promise<void> {
   console.log(`  Brier Skill : ${brierSkill(burnP, obsBurn).toFixed(4)}   (>0 才赢过气候态)`);
   console.log(`  AUC         : ${auc(burnP, obsBurn).toFixed(4)}`);
   console.log(`  TSS@0.50    : ${tss(burnP, obsBurn, 0.5).toFixed(4)}`);
-  console.log(`  TSS 最优    : ${t.tss.toFixed(4)} @ 阈值 ${t.threshold.toFixed(2)}`);
+  console.log(`  TSS 最优    : ${t.tss.toFixed(4)} @ 阈值 ${t.threshold.toFixed(2)}   (in-sample，偏乐观)`);
+
+  // 按日期分组的交叉验证：阈值只在训练折上选，留出折上的 TSS 才是
+  // 「明天再来一天新数据」时期望拿到的技能。两者差值即阈值过拟合幅度。
+  const cv = dateGroupedCV(preds.map((p) => p.date), burnP, obsBurn);
+  if (cv) {
+    console.log('\n  交叉验证（按日期分组，阈值仅由训练折选出）:');
+    console.log('    fold  trainN  testN  阈值    TSS(训练)  TSS(留出)');
+    for (const r of cv) {
+      console.log(
+        `    ${String(r.fold).padEnd(5)} ${String(r.trainN).padStart(6)} ${String(r.testN).padStart(6)}  ${r.threshold.toFixed(2)}    ${r.tssTrain.toFixed(4)}     ${r.tssTest.toFixed(4)}`,
+      );
+    }
+    const testTotal = cv.reduce((a, r) => a + r.testN, 0);
+    const meanOut = cv.reduce((a, r) => a + r.tssTest * r.testN, 0) / Math.max(testTotal, 1);
+    console.log(`    留出折合样本 TSS: ${meanOut.toFixed(4)}   (按 testN 加权；相对 in-sample 最优 ${t.tss.toFixed(4)} 的落差 = 过拟合)`);
+  } else {
+    console.log('\n  交叉验证：不同日期 < 3 天，无法分组，以上 TSS 均为 in-sample（偏乐观）。');
+  }
   console.log('\n  可靠度表:');
   for (const r of reliabilityTable(burnP, obsBurn)) {
     console.log(`    ${r.bin.padEnd(9)} n=${String(r.n).padStart(4)}  预测 ${(r.predicted * 100).toFixed(1)}%  实际 ${(r.observed * 100).toFixed(1)}%`);
   }
 
   console.log('\n— 有序头 grade|burn —');
-  console.log(`  Spearman ρ      : ${spearman(vivid, obsIdx).toFixed(4)}`);
+  console.log(`  Spearman ρ      : ${spearman(vivid, obsOrdinal).toFixed(4)}`);
   console.log(`  相邻档准确率(±1) : ${adjacentAccuracy(predIdx, obsIdx, 1).toFixed(4)}`);
   console.log(`  精确档准确率     : ${adjacentAccuracy(predIdx, obsIdx, 0).toFixed(4)}`);
 
   const cm = confusionMatrix(predIdx, obsIdx);
   console.log('\n  混淆矩阵（行=实际，列=预测，按列归一化）:');
-  const names = GRADES.map((g) => g.label);
-  console.log('         ' + names.map((n) => n.padStart(9)).join(''));
+  // 表头必须是 GRADE_INDEX 值域（0..6）的 7 个档名，不是 GRADES 的 10 个 ——
+  // 矩阵本身只有 7×7（moderatePlus→3、majorLow→4、premium→5 已归并），
+  // 用 10 个名字会让列与档错位（审查 P1）。
+  const names = ['无烧', '微烧', '小烧', '中烧', '中到大烧', '特大烧', '世纪大烧'];
+  console.log('         ' + names.map((n) => padStartDisplay(n, 9)).join(''));
   cm.colNorm.forEach((row, i) => {
-    console.log(names[i].padEnd(9) + row.map((v) => `${(v * 100).toFixed(0)}%`.padStart(9)).join(''));
+    console.log(padEndDisplay(names[i], 9) + row.map((v) => `${(v * 100).toFixed(0)}%`.padStart(9)).join(''));
   });
 
   if (skipped.length) {

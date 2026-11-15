@@ -35,10 +35,18 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   // 上一版写的是 `h > lowBase`（AGL 对 MSL），于是拉萨这类高原城市
   // （地面 3650m、机位 AGL=0、低云约 780m MSL）会显示「低云之下」，
   // 而实际已高出低云 2870m。引擎内部一直用 MSL，只有这里漏了。
+  //
+  // 判「机位是否越过云层」必须比**云顶**（审查 P2）：比云底会让
+  // 「已在云层中间」显示成「低云之上」，与上面低云底/顶的注释自相矛盾。
   const observerMsl = p.observerHeightM;
-  const aboveLow = observerMsl > lowBase;
-  // 「云底」只在确实存在低云时才作为判据（cloudBaseM 为 0 表示无云可遮）
-  const hasLowCloud = p.cloudBaseM > 0;
+  const aboveLow = observerMsl > lowTop;
+  // 「云底」只在确实存在低云时才作为判据。
+  // 上一版用 `cloudBaseM > 0` —— 但 cloudBaseM 是**任意层**的最低云底，
+  // 只有卷云时也为正，于是「无低云可遮」被误判成「低云之下」（审查 P2）。
+  const hasLowCloud = useMemo(
+    () => p.layers.some((l) => (l.key === '1000' || l.key === '925' || l.key === '850') && l.cover > 5),
+    [p.layers],
+  );
   const aboveCloudBase = !hasLowCloud || observerMsl > p.cloudBaseM;
 
   const clock = localClock(p.timeline.peakMs, p.timezoneOffsetSeconds);

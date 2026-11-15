@@ -13,6 +13,7 @@ import {
   brier,
   brierSkill,
   confusionMatrix,
+  normalizeObservedLabel,
   parseLabels,
   reliabilityTable,
   spearman,
@@ -178,5 +179,24 @@ describe('CSV 解析', () => {
 
   it('缺必需列时抛错', () => {
     expect(() => parseLabels('date,lat\n2026-06-24,31.23')).toThrow();
+  });
+});
+
+describe('观测标签归一化', () => {
+  it('接受 majorlow，并保留历史误拼 majordlow', () => {
+    expect(normalizeObservedLabel('majorlow')).toEqual({ index: 4, ordinal: 4 });
+    expect(normalizeObservedLabel('majordlow')).toEqual({ index: 4, ordinal: 4 });
+  });
+
+  it('连续标签保留 0–6 有序强度，同时映射到最近档位', () => {
+    expect(normalizeObservedLabel('0.5')).toEqual({ index: 3, ordinal: 3 });
+    expect(normalizeObservedLabel('0.75')).toEqual({ index: 5, ordinal: 4.5 });
+  });
+
+  it('拒绝空标签、非数值和超出 0–1 的连续标签', () => {
+    expect(normalizeObservedLabel('')).toBeNull();
+    expect(normalizeObservedLabel('unknown')).toBeNull();
+    expect(normalizeObservedLabel('1.01')).toBeNull();
+    expect(normalizeObservedLabel('-0.01')).toBeNull();
   });
 });

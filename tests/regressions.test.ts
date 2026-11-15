@@ -148,11 +148,13 @@ describe('P0 光路剖面不再把好天气判成"已入地影"', () => {
       visible: Object.fromEntries(LEVEL_KEYS.map((k) => [k, true])) as Record<LevelKey, boolean>,
     }));
 
-  it('太阳高挂 + 45% 黄金层时，参考层透过率必须接近 1', () => {
+  it('太阳高挂 + 45% 黄金层时，自身消光后的参考层照明仍显著非零', () => {
     for (const alt of [10, 5, 3, 1]) {
       const r = rayMarchingTransmittance(4200, alt, rings({ '600': 0.45, '500': 0.45 }), Array(6).fill(4));
-      // 上一版恒为 2.09e−11，导致 Canvas 永不绘制光路与太阳
-      expect(r.transmittance).toBeGreaterThan(0.5);
+      // 旧错误值恒为 2.09e−11；计入云中点自身消光后不再要求 T>0.5，
+      // 尤其 α=1° 的掠射光本来就会显著衰减。
+      expect(r.transmittance).toBeGreaterThan(0.35);
+      expect(r.transmittance).toBeLessThanOrEqual(1);
     }
   });
 
@@ -175,12 +177,14 @@ describe('P0 光路剖面不再把好天气判成"已入地影"', () => {
     expect(r.directTransmittance).toBeLessThan(r.transmittance + 1e-9);
   });
 
-  it('光学厚度与透过率量级自洽', () => {
-    const r = rayMarchingTransmittance(4200, 3, rings({ '600': 0.45 }), Array(6).fill(4));
-    // 概率化云隙透射下，45% 单层 + 太阳高挂时的 τ 很小（几十 km 路径）
+  it('光学厚度与自身消光后的透过率量级自洽', () => {
+    const rs = rings({ '600': 0.45 });
+    const r = rayMarchingTransmittance(4200, 3, rs, Array(6).fill(4));
+    const withoutSelf = rayMarchingTransmittance(4200, 3, rs, Array(6).fill(4), { includeSelfExtinction: false });
     expect(r.opticalDepth).toBeGreaterThan(0.01);
     expect(r.opticalDepth).toBeLessThan(5);
-    expect(r.transmittance).toBeGreaterThan(0.9);
+    expect(r.transmittance).toBeGreaterThan(0.5);
+    expect(r.transmittance).toBeLessThan(withoutSelf.transmittance);
   });
 });
 
@@ -1036,12 +1040,15 @@ describe('云块特征尺度必须按云属取', () => {
     expect(tCumulus).toBeLessThan(0.55);
   });
 
-  it('加 30~50% 卷云应提升总分（"黄金层+卷云"是教科书级大烧）', () => {
+  it('厚黄金层上加卷云有正贡献且遮挡有界（不要求总分必然上升）', () => {
     const base = predict(bundle(C({ '600': 0.6, '500': 0.6 }), { aod: 0.05, pm25: 4, vis: 38000 }));
     const withCirrus = predict(
       bundle(C({ '600': 0.6, '500': 0.6, '300': 0.45 }), { aod: 0.05, pm25: 4, vis: 38000 }),
     );
-    expect(withCirrus.vividness).toBeGreaterThan(base.vividness);
+    const cirrus = withCirrus.layers.find((l) => l.key === '300')!;
+    expect(cirrus.contribution).toBeGreaterThan(0);
+    // 高云既是新画布也会遮蔽下层；厚黄金层场景允许总分略降，但不能抹黑。
+    expect(withCirrus.vividness).toBeGreaterThan(base.vividness * 0.75);
   });
 
   it('薄卷云在 70% 附近最优、满铺仍可，但覆盖曲线必须有峰值（不是单调）', () => {
@@ -1271,13 +1278,12 @@ describe('Path 2：视线光谱消光', () => {
     expect(ratioAt(450)).toBeLessThan(ratioAt(220));
   });
 
-  it('强度（亮度）与色相解耦：Path 2 只改色相，不改 Path 1 的亮度', () => {
+  it('Path 2 同时降低实际亮度并改变色相，亮度与合成 RGB 同源', () => {
     const sun = directSunRgb(-1.5, 4200, 0.1, 1.3, 55, 300);
     const near = compositeCloudColor(sun.rgb, viewPathRgb(0, 4200, 100, 0.1, 1.3, 55, 300).rgb);
     const far = compositeCloudColor(sun.rgb, viewPathRgb(450, 4200, 100, 0.1, 1.3, 55, 300).rgb);
-    // 亮度（来自 Path 1）完全一致
-    expect(far.intensity).toBeCloseTo(near.intensity, 12);
-    // 但色相必须不同（Path 2 起作用了）
+    expect(far.intensity).toBeLessThan(near.intensity);
+    expect(far.intensity).toBeCloseTo(colorChroma(far.color).luminance, 12);
     expect(colorChroma(far.color).hue).toBeLessThan(colorChroma(near.color).hue);
   });
 

@@ -7,80 +7,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ENSEMBLE_QUOTA_COST, ENSEMBLE_QUOTA_PER_MIN } from '../src/data/ensemble';
+import { ENSEMBLE_QUOTA_COST, ENSEMBLE_QUOTA_PER_MIN, memberScore } from '../src/data/ensemble';
 
-/**
- * 复刻 ensemble.ts 里的 memberScore 逻辑做单元测试。
- * （函数未导出，因为它是内部实现；这里复制同样的算式以锁定行为契约。）
- */
-function memberScore(
-  low: number,
-  mid: number,
-  high: number,
-  golden: number,
-  direct: number,
-  diffuse: number,
-  precip: number,
-  altDeg: number,
-): number {
-  const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
-  const smoothstep = (a: number, b: number, x: number) => {
-    const t = clamp((x - a) / (b - a), 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-  // cloudLitFactor 的简化复刻（与 optics.ts 同结构）
-  const litOf = (hM: number, alt: number, role: 'mid' | 'golden' | 'high') => {
-    const R = 6371;
-    const dipDeg = (Math.acos(R / (R + hM / 1000)) * 180) / Math.PI;
-    const margin = hM - (alt >= 0 ? 0 : 1000 * R * (1 / Math.cos((Math.abs(alt) * Math.PI) / 180) - 1));
-    const softM = Math.max(320, Math.abs(Math.tan((alt * Math.PI) / 180)) * 30000);
-    const directF = 1 / (1 + Math.exp(-margin / softM));
-    if (alt < -1 && (role === 'high' || role === 'golden')) {
-      const depth = Math.max(0, -margin);
-      const scale = role === 'high' ? 9000 : 5000;
-      const tail = (role === 'high' ? 0.55 : 0.4) * Math.exp(-depth / scale);
-      return clamp(Math.max(directF, tail), 0, 1);
-    }
-    void dipDeg;
-    return clamp(directF, 0, 1);
-  };
-
-  const deckQuality = (cover01: number, role: 'low' | 'mid' | 'golden' | 'high') => {
-    const c = clamp(cover01, 0, 1);
-    if (c <= 0.03) return 0;
-    const optimum = role === 'low' ? 0.2 : role === 'mid' ? 0.42 : role === 'golden' ? 0.55 : 0.72;
-    const sigma = role === 'low' ? 0.22 : role === 'mid' ? 0.26 : role === 'golden' ? 0.3 : 0.32;
-    const pref = Math.exp(-0.5 * ((c - optimum) / sigma) ** 2);
-    const presence = Math.min(1, Math.max(0, (c - 0.03) / 0.09));
-    return clamp(presence * pref, 0, 1);
-  };
-
-  const W = { low: 0.1, mid: 0.24, golden: 0.66, high: 0.46 };
-
-  const sLow = deckQuality(low, 'low');
-  const sMid = deckQuality(mid, 'mid') * litOf(3000, altDeg, 'mid');
-  const sGolden = deckQuality(golden, 'golden') * litOf(4200, altDeg, 'golden');
-  const sHigh = deckQuality(high, 'high') * litOf(9200, altDeg, 'high');
-
-  const union = (a: number, b: number) => 1 - (1 - a) * (1 - b);
-  let sum = 0;
-  sum += W.golden * union(sGolden, sGolden * 0.85);
-  sum += W.high * union(sHigh, sHigh * 0.9);
-  sum += W.mid * sMid;
-  sum += W.low * sLow;
-  sum /= 1.25;
-
-  const overcast = mid > 0.85 && golden > 0.8 && high > 0.85;
-  if (overcast) sum *= 0.26;
-  else if (low > 0.8) sum *= 0.3;
-
-  const beamTotal = direct + diffuse;
-  const directShare = beamTotal > 5 ? clamp(direct / beamTotal, 0, 1) : 0.5;
-  const beamFactor = 0.8 + 0.4 * directShare;
-
-  const rainPenalty = precip > 0.5 ? Math.max(0.25, 1 - precip * 0.35) : 1;
-  return clamp(sum * beamFactor * rainPenalty, 0, 1.3);
-}
+// 直接测试**生产实现**。上一版在这里复制了一份 memberScore，
+// 后果是生产代码改为指数-随机重叠后，这份复制件仍在测旧的
+// 独立并集公式 —— 测试通过 ≠ 线上正确（审查 P1）。
 
 const EVENING = -1.5;
 

@@ -62,8 +62,11 @@ export function RayMarchCard() {
       sunAltitudeDeg: sun.altitude,
       observerHeightM: query.observerHeightM,
       focusLevel,
+      // 与主评分同源：COT 乘子来自预测结果，平流修正用当前帧太阳方位
+      cotFactor: p?.debug.cotFactor,
+      sightAzimuthDeg: sun.azimuth,
     });
-  }, [bundle, size.w, size.h, query.primaryModel, timeMs, sun.altitude, query.observerHeightM, focusLevel]);
+  }, [bundle, size.w, size.h, query.primaryModel, timeMs, sun.altitude, sun.azimuth, query.observerHeightM, focusLevel, p?.debug.cotFactor]);
 
   useEffect(() => {
     draw();

@@ -17,6 +17,7 @@ import type {
   ForecastBundle,
   GeoPoint,
   HourlySample,
+  HourlyScalarField,
   ModelDataset,
   ModelId,
   RingAerosol,
@@ -81,7 +82,7 @@ const HOURLY_VARS = [
   'terrestrial_radiation',
   // 深对流识别：CAPE 高 + 强降水 = 积雨云黑幕，不该当画布
   'cape',
-  // ── 高空风场：用于半拉格朗日平流插值（峰值时刻与云洞位置的相位修正）──
+  // ── 高空风场：用于云量的风场启发时间平移修正（峰值时刻与云洞位置的相位修正）──
   //
   // **只要 500hPa 一层**。实测确认：平流插值只消费 `windSpeed500` /
   // `windDir500`（它最代表"画布层"的输运）；700hPa 偏局地湍流、
@@ -174,10 +175,11 @@ function classify429(res: Response, attempt: number): Error {
   return new RateLimitError(retryAfterMs > 0 ? retryAfterMs : 2500 * Math.pow(2, attempt));
 }
 
-async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Promise<T> {
-  // 同一 URL 的内存去重：被取消的调用不能复用别人那条请求，
-  // 否则取消者会连带把正常请求也 abort 掉。
-  const existing = signal ? undefined : inflight.get(url);
+export async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Promise<T> {
+  // 只有不携带 AbortSignal 的调用参与共享。带 signal 的请求必须拥有独立
+  // 生命周期：既不能复用别人的 Promise，也不能在完成/重试时删掉别人的条目。
+  const shared = !signal;
+  const existing = shared ? inflight.get(url) : undefined;
   if (existing) return existing as Promise<T>;
 
   const task = (async (): Promise<T> => {
@@ -192,7 +194,10 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
     return (await res.json()) as T;
   })();
 
-  inflight.set(url, task);
+  if (shared) inflight.set(url, task);
+  const clearShared = () => {
+    if (shared && inflight.get(url) === task) inflight.delete(url);
+  };
   try {
     return await task;
   } catch (err) {
@@ -204,12 +209,12 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
     if (attempt < 3 && retryable) {
       const wait = err instanceof RateLimitError ? err.retryAfterMs : 800 * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, Math.min(wait, 8000)));
-      inflight.delete(url);
+      clearShared();
       return fetchJson<T>(url, attempt + 1, signal);
     }
     throw err;
   } finally {
-    inflight.delete(url);
+    clearShared();
   }
 }
 
@@ -217,7 +222,7 @@ async function fetchJson<T>(url: string, attempt = 0, signal?: AbortSignal): Pro
 // 缓存
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CACHE_PREFIX = 'aetherglow:v3:';
+const CACHE_PREFIX = 'aetherglow:v4:';
 const CACHE_TTL_LIVE_MS = 18 * 60 * 1000; // 实时预报
 const CACHE_TTL_PAST_MS = 6 * 3600 * 1000;
 /**
@@ -480,14 +485,26 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
   for (let i = 0; i < times.length; i++) {
     const timeMs = localIsoToUtcMs(times[i], offsetSeconds);
     if (!Number.isFinite(timeMs)) continue;
-    const sp = numOrNull(series(hourly, 'surface_pressure', model)[i]) ?? 1013.25;
+    const scalarValid: NonNullable<HourlySample['scalarValid']> = {};
+    const scalar = (field: HourlyScalarField, value: unknown, fallback = 0): number => {
+      const parsed = numOrNull(value);
+      scalarValid[field] = parsed != null;
+      return parsed ?? fallback;
+    };
+    const sp = scalar('surfacePressureHpa', series(hourly, 'surface_pressure', model)[i], 1013.25);
 
     const cloud = {} as Record<LevelKey, number>;
+    const cloudValid: NonNullable<HourlySample['cloudValid']> = {};
     const levelHeight = {} as Record<LevelKey, number>;
+    const levelHeightValid: NonNullable<HourlySample['levelHeightValid']> = {};
     const levelTemp: Partial<Record<LevelKey, number>> = {};
     const levelHumidity: Partial<Record<LevelKey, number>> = {};
     for (const lv of PRESSURE_LEVELS) {
-      cloud[lv.key] = clamp(num(series(hourly, `cloud_cover_${lv.hpa}hPa`, model)[i]), 0, 100);
+      const cloudRaw = numOrNull(series(hourly, `cloud_cover_${lv.hpa}hPa`, model)[i]);
+      cloudValid[lv.key] = cloudRaw != null;
+      cloud[lv.key] = cloudRaw == null ? 0 : clamp(cloudRaw, 0, 100);
+      levelHeightValid[lv.key] =
+        numOrNull(series(hourly, `geopotential_height_${lv.hpa}hPa`, model)[i]) != null;
       levelHeight[lv.key] = levelHeightM(hourly, model, lv, i, sp);
       const t = numOrNull(series(hourly, `temperature_${lv.hpa}hPa`, model)[i]);
       if (t != null) levelTemp[lv.key] = t;
@@ -495,33 +512,35 @@ function buildSamples(hourly: OmHourly, model: ModelId, offsetSeconds: number): 
       if (rh != null) levelHumidity[lv.key] = clamp(rh, 0, 100);
     }
 
-    const visRaw = numOrNull(series(hourly, 'visibility', model)[i]);
-    // Open-Meteo 的 visibility 单位是米；部分模型为 null
-    const visMs = visRaw == null ? 0 : clamp(visRaw, 0, 120000);
-
     out.push({
       timeMs,
       cloud,
+      cloudValid,
       levelHeightM: levelHeight,
+      levelHeightValid,
+      scalarValid,
       levelTempC: levelTemp,
       levelHumidity,
-      boundaryLayerM: Math.max(0, numOrNull(series(hourly, 'boundary_layer_height', model)[i]) ?? 0),
-      freezingLevelM: Math.max(0, numOrNull(series(hourly, 'freezing_level_height', model)[i]) ?? 0),
-      directRadiation: Math.max(0, num(series(hourly, 'direct_radiation', model)[i])),
-      diffuseRadiation: Math.max(0, num(series(hourly, 'diffuse_radiation', model)[i])),
-      shortwaveRadiation: Math.max(0, num(series(hourly, 'shortwave_radiation', model)[i])),
-      terrestrialRadiation: Math.max(0, num(series(hourly, 'terrestrial_radiation', model)[i])),
-      cape: Math.max(0, num(series(hourly, 'cape', model)[i])),
-      windSpeed500: Math.max(0, num(series(hourly, 'wind_speed_500hPa', model)[i])),
-      windDir500: numOrNull(series(hourly, 'wind_direction_500hPa', model)[i]) ?? undefined,
-      totalColumnWaterVapour: Math.max(0, numOrNull(series(hourly, 'total_column_integrated_water_vapour', model)[i]) ?? 0),
-      cloudLow: clamp(num(series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
-      cloudMid: clamp(num(series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
-      cloudHigh: clamp(num(series(hourly, 'cloud_cover_high', model)[i]), 0, 100),
-      cloudTotal: clamp(num(series(hourly, 'cloud_cover', model)[i]), 0, 100),
-      precipitation: Math.max(0, num(series(hourly, 'precipitation', model)[i])),
-      humidity: clamp(num(series(hourly, 'relative_humidity_2m', model)[i], 55), 0, 100),
-      visibilityM: visMs,
+      boundaryLayerM: Math.max(0, scalar('boundaryLayerM', series(hourly, 'boundary_layer_height', model)[i])),
+      freezingLevelM: Math.max(0, scalar('freezingLevelM', series(hourly, 'freezing_level_height', model)[i])),
+      directRadiation: Math.max(0, scalar('directRadiation', series(hourly, 'direct_radiation', model)[i])),
+      diffuseRadiation: Math.max(0, scalar('diffuseRadiation', series(hourly, 'diffuse_radiation', model)[i])),
+      shortwaveRadiation: Math.max(0, scalar('shortwaveRadiation', series(hourly, 'shortwave_radiation', model)[i])),
+      terrestrialRadiation: Math.max(0, scalar('terrestrialRadiation', series(hourly, 'terrestrial_radiation', model)[i])),
+      cape: Math.max(0, scalar('cape', series(hourly, 'cape', model)[i])),
+      windSpeed500: Math.max(0, scalar('windSpeed500', series(hourly, 'wind_speed_500hPa', model)[i])),
+      windDir500: scalar('windDir500', series(hourly, 'wind_direction_500hPa', model)[i], Number.NaN),
+      totalColumnWaterVapour: Math.max(
+        0,
+        scalar('totalColumnWaterVapour', series(hourly, 'total_column_integrated_water_vapour', model)[i]),
+      ),
+      cloudLow: clamp(scalar('cloudLow', series(hourly, 'cloud_cover_low', model)[i]), 0, 100),
+      cloudMid: clamp(scalar('cloudMid', series(hourly, 'cloud_cover_mid', model)[i]), 0, 100),
+      cloudHigh: clamp(scalar('cloudHigh', series(hourly, 'cloud_cover_high', model)[i]), 0, 100),
+      cloudTotal: clamp(scalar('cloudTotal', series(hourly, 'cloud_cover', model)[i]), 0, 100),
+      precipitation: Math.max(0, scalar('precipitation', series(hourly, 'precipitation', model)[i])),
+      humidity: clamp(scalar('humidity', series(hourly, 'relative_humidity_2m', model)[i], 55), 0, 100),
+      visibilityM: clamp(scalar('visibilityM', series(hourly, 'visibility', model)[i]), 0, 120000),
       surfacePressureHpa: sp,
     });
   }
@@ -540,12 +559,12 @@ function buildAerosol(hourly: OmHourly, offsetSeconds: number): AerosolSample[] 
       timeMs,
       // 保留 null 语义：数值上仍需一个可用于插值的占位（0.22 = 气候学中值），
       // 但 `aodValid` 明确标记它是不是真值。引擎据此把 `available` 判成 false。
-      aod: clamp(aodRaw ?? CLIMATOLOGICAL_AOD, 0.01, 3),
+      aod: clamp(aodRaw ?? CLIMATOLOGICAL_AOD, 0, 3),
       dust: Math.max(0, num((hourly['dust'] as Array<number | null>)?.[i])),
       pm25: Math.max(0, num((hourly['pm2_5'] as Array<number | null>)?.[i])),
       pm10: Math.max(0, num((hourly['pm10'] as Array<number | null>)?.[i])),
       humidity: clamp(num((hourly['relative_humidity_2m'] as Array<number | null>)?.[i], 55), 0, 100),
-      aodValid: aodRaw != null && aodRaw > 0,
+      aodValid: aodRaw != null && aodRaw >= 0,
     });
   }
   return out;
@@ -891,7 +910,13 @@ function backfillModelScalars(datasets: Record<ModelId, ModelDataset>, models: M
             }
           }
           const v = best?.[field] ?? 0;
-          if (v > 0 && bestDt <= 45 * 60000) sample[field] = v;
+          if (v > 0 && bestDt <= 45 * 60000) {
+            sample[field] = v;
+            // 借来的值是**真实模式数据**（只是来自另一个模型），必须同步更新
+            // 有效性标记 —— 否则 `interpolateHourly` 的缺测过滤会把它当成
+            // "本模型缺测"而剔除，补齐等于没做。
+            if (sample.scalarValid) sample.scalarValid[field] = true;
+          }
         }
       }
     }

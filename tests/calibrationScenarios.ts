@@ -27,7 +27,8 @@ const stdH: Record<LevelKey, number> = {
 export interface Scenario {
   name: string;
   cover: Partial<Record<LevelKey, number>>;
-  /** 低层云（925/850 覆盖） */
+  /** 可选逐环覆盖；缺省时所有环使用 cover。用于检验云墙的位置语义。 */
+  coverAt?: (ringIndex: number) => Partial<Record<LevelKey, number>>;
   precip?: number;
   visibilityM?: number;
   humidity?: number;
@@ -39,11 +40,12 @@ export interface Scenario {
   expect: [number, number];
 }
 
-function mkSample(t: number, sc: Scenario): HourlySample {
+function mkSample(t: number, sc: Scenario, ringIndex = 0): HourlySample {
+  const cover = sc.coverAt?.(ringIndex) ?? sc.cover;
   const cloud = {} as Record<LevelKey, number>;
   const levelHeightM = {} as Record<LevelKey, number>;
   for (const k of LEVEL_KEYS) {
-    cloud[k] = (sc.cover[k] ?? 0) * 100;
+    cloud[k] = (cover[k] ?? 0) * 100;
     levelHeightM[k] = stdH[k];
   }
   return {
@@ -51,9 +53,9 @@ function mkSample(t: number, sc: Scenario): HourlySample {
     cloud,
     levelHeightM,
     levelTempC: {},
-    cloudLow: (sc.cover['925'] ?? 0) * 100,
-    cloudMid: (sc.cover['700'] ?? 0) * 100,
-    cloudHigh: ((sc.cover['300'] ?? 0) + (sc.cover['400'] ?? 0)) * 50,
+    cloudLow: (cover['925'] ?? 0) * 100,
+    cloudMid: (cover['700'] ?? 0) * 100,
+    cloudHigh: ((cover['300'] ?? 0) + (cover['400'] ?? 0)) * 50,
     cloudTotal: Math.max(...LEVEL_KEYS.map((k) => cloud[k])),
     precipitation: sc.precip ?? 0,
     humidity: sc.humidity ?? 55,
@@ -68,10 +70,10 @@ export function buildScenario(sc: Scenario, model: ModelId = 'ecmwf'): ForecastB
   for (let h = -6; h <= 6; h++) times.push(base + h * 3600000);
 
   const ringKm = [0, 30, 80, 150, 280, 450];
-  const rings = ringKm.map((d) => ({
+  const rings = ringKm.map((d, i) => ({
     ringKm: d,
     point: { lat: 31.23, lon: 121.47 },
-    samples: times.map((t) => mkSample(t, sc)),
+    samples: times.map((t) => mkSample(t, sc, i)),
   }));
 
   return {
@@ -194,26 +196,20 @@ export const SCENARIOS: Scenario[] = [
   {
     name: '高原远山遮挡黄金层光路',
     cover: { '600': 0.5, '500': 0.45 },
-    // 80km 处 3400m 高于 600hPa 光路的 3202m → 真实遮挡
-    terrain: [4, 1500, 3400, 2800, 4200, 5000],
+    // 600hPa 标称高度为 4200m。报告链路用 6000m 高山覆盖相关时段；
+    // 旧夹具把 80km/3400m 误写成 3202m，实际上从未遮挡峰值光路。
+    terrain: [4, 6000, 3400, 2800, 4200, 5000],
     aod: 0.12,
     expect: [0.0, 0.45],
   },
   {
-    name: '远端 200-450km 低云墙封死天窗',
-    cover: { '600': 0.5, '500': 0.45, '700': 0.9 },
-    precip: 1.2,
-    aod: 0.2,
-    expect: [0.0, 0.25],
-  },
-  {
-    name: '黄金层 + 满铺卷云 · 大烧天花板',
+    name: '黄金层 + 满铺卷云 · 双层大烧',
     cover: { '600': 0.45, '500': 0.4, '300': 0.9 },
     aod: 0.06,
     pm25: 5,
     visibilityM: 34000,
     humidity: 40,
-    // 高积云被点燃 + 满铺卷云作第二画布，是本引擎可达到的最高档
-    expect: [1.0, 1.5],
+    // Path 2 对远端主导云幕还有有界的观测对比度衰减，不再锁死 ≥1.0。
+    expect: [0.85, 1.3],
   },
 ];

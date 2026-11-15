@@ -8,13 +8,38 @@ export interface GeoPoint {
   lon: number;
 }
 
+export type HourlyScalarField =
+  | 'boundaryLayerM'
+  | 'freezingLevelM'
+  | 'directRadiation'
+  | 'diffuseRadiation'
+  | 'shortwaveRadiation'
+  | 'terrestrialRadiation'
+  | 'totalColumnWaterVapour'
+  | 'cape'
+  | 'windSpeed500'
+  | 'windDir500'
+  | 'cloudLow'
+  | 'cloudMid'
+  | 'cloudHigh'
+  | 'cloudTotal'
+  | 'precipitation'
+  | 'humidity'
+  | 'visibilityM'
+  | 'surfacePressureHpa';
+
 /** 单小时观测包（已按期次对齐） */
 export interface HourlySample {
   timeMs: number;
-  /** 各等压面云量 % */
+  /** 各等压面云量 %；缺测占位为 0，必须结合 cloudValid 使用 */
   cloud: Record<LevelKey, number>;
+  /** undefined 表示旧缓存/合成数据，按数值有效处理；false 是明确缺测 */
+  cloudValid?: Partial<Record<LevelKey, boolean>>;
   /** 各等压面位势高度 m（缺测用标称值） */
   levelHeightM: Record<LevelKey, number>;
+  levelHeightValid?: Partial<Record<LevelKey, boolean>>;
+  /** 标量缺测有效性；undefined 按旧数据兼容规则处理 */
+  scalarValid?: Partial<Record<HourlyScalarField, boolean>>;
   /** 各等压面温度 °C */
   levelTempC: Partial<Record<LevelKey, number>>;
   /**
@@ -59,7 +84,7 @@ export interface HourlySample {
    */
   cape?: number;
   /**
-   * 高空风（**只保留 500hPa**）—— 用于半拉格朗日平流插值。
+   * 高空风（**只保留 500hPa**）—— 用于云量的风场启发时间平移修正。
    *
    * 云场是被风平移输运的，逐点线性插值会把"云还没到"与"云已走"
    * 平均成一片均匀云，抹平峰值时刻并漂移云洞位置。有了高空风，
@@ -389,6 +414,8 @@ export interface SunsetPredictionOutput {
   debug: {
     stageWeight: number;
     ringScores: number[];
+    /** 主源的整场 COT 标定乘子（截面图需与主评分同源） */
+    cotFactor: number;
     layerDebug: Array<{
       key: LevelKey;
       cover: number;
