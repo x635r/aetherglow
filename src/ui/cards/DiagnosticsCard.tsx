@@ -134,12 +134,26 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
         </div>
         <div className="mt-1.5 grid grid-cols-3 gap-1.5">
           <SmallStat label="观测海拔" value={`${Math.round(p.observerHeightM)}m`} />
-          <SmallStat label="云底" value={p.cloudBaseM > 0 ? `${Math.round(p.cloudBaseM)}m` : '无'} />
+          {/* `p.cloudBaseM` 是「≥20% 覆盖的最低一层」—— 晴天只有 250hPa 卷云时
+              它会是 10.6km，标成「云底」会让人误以为是低云底（线上实测到过）。
+              这里按真实存在的层标注层名，无云则显示「无」。 */}
+          <SmallStat label="最低云层" value={lowestLayerLabel(p)} />
           <SmallStat label="云海反转" value={p.cloudSeaReversal ? '已触发' : '未触发'} accent={p.cloudSeaReversal ? '#38e8d0' : undefined} />
         </div>
       </div>
     </Panel>
   );
+}
+
+/**
+ * 最低的真实云层（≥5% 覆盖），格式 `925hPa · 811m`；无云返回「无」。
+ * 不用 `p.cloudBaseM` —— 它是任意层最低云底，晴天只有卷云时会是 10.6km。
+ */
+function lowestLayerLabel(p: SunsetPredictionOutput): string {
+  const withCloud = p.layers.filter((l) => l.cover > 5).sort((a, b) => a.altitudeM - b.altitudeM);
+  if (!withCloud.length) return '无';
+  const l = withCloud[0];
+  return `${LEVEL_BY_KEY[l.key].hpa}hPa · ${Math.round(l.altitudeM)}m`;
 }
 
 function SmallStat({ label, value, accent }: { label: string; value: string; accent?: string }) {

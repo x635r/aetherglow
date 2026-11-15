@@ -25,16 +25,21 @@ export function MultiModelCard({
   const mean = vals.reduce((a, b) => a + b, 0) / Math.max(vals.length, 1);
   const spread = max - min;
 
+  // **必须用 modelDisagreement，不能用 uncertainty**（审查 P2）：
+  // uncertainty = 0.8·分歧 + 0.6·(1−完整度)，把数据缺失也算进了"分歧"。
+  // 线上实测曾出现：三源峰值 0.44/0.52/0.02，真实分歧 47.5%，
+  // 却因为完整度扣分被显示成 38%，与标题「基本一致」阈值互相打架。
+  const d = p.modelDisagreement;
   const agreeLabel =
-    p.uncertainty < 0.18 ? '高度一致' : p.uncertainty < 0.42 ? '基本一致' : p.uncertainty < 0.7 ? '存在分歧' : '分歧显著';
-  const agreeColor = p.uncertainty < 0.18 ? '#38e8d0' : p.uncertainty < 0.42 ? '#7dd3fc' : p.uncertainty < 0.7 ? '#ffb340' : '#ff6b6b';
+    d < 0.18 ? '高度一致' : d < 0.42 ? '基本一致' : d < 0.7 ? '存在分歧' : '分歧显著';
+  const agreeColor = d < 0.18 ? '#38e8d0' : d < 0.42 ? '#7dd3fc' : d < 0.7 ? '#ffb340' : '#ff6b6b';
 
   return (
     <Panel
       className="col-span-full sm:col-span-6 lg:col-span-3 xl:col-span-2"
       title="多模型交叉验证"
-      subtitle={`${agreeLabel} · 分歧 ${(p.uncertainty * 100).toFixed(0)}%`}
-      right={<InfoTip text="分歧度 = 峰值极差 /（峰值极差 + 0.55），再与数据完整度合成为不确定性。分歧越大，预报不确定性越高，摄影师应准备更宽的曝光/焦段冗余，并在临场根据实况微调。" />}
+      subtitle={`${agreeLabel} · 分歧 ${(d * 100).toFixed(0)}%`}
+      right={<InfoTip text="分歧度 = 峰值极差 /（峰值极差 + 0.55），只在云量完整度 ≥50% 的模型之间比较。它与「数据完整度」是两个独立因子，合成后得到综合不确定性。" />}
       bodyClass="!pt-0"
     >
       {/* 一致性条 */}
@@ -133,9 +138,9 @@ export function MultiModelCard({
         </span>
       </div>
       <p className="mt-1 text-[9.5px] leading-snug text-slate-500 break-anywhere">
-        {p.uncertainty < 0.18
+        {d < 0.18
           ? '三源高度收敛，可放心出发。'
-          : p.uncertainty < 0.42
+          : d < 0.42
             ? '主流一致，仍建议提前 10 分钟到场观察实况。'
             : '模型分歧明显：优先参考本地临近云图与实况，备好多机位与多焦段。'}
       </p>

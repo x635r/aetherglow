@@ -41,13 +41,18 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   const observerMsl = p.observerHeightM;
   const aboveLow = observerMsl > lowTop;
   // 「云底」只在确实存在低云时才作为判据。
-  // 上一版用 `cloudBaseM > 0` —— 但 cloudBaseM 是**任意层**的最低云底，
-  // 只有卷云时也为正，于是「无低云可遮」被误判成「低云之下」（审查 P2）。
+  // 上一版用 `cloudBaseM > 0` —— 但 cloudBaseM 是**任意层**的最低云底
+  // （≥20% 覆盖的最低一层，可能是 250hPa 卷云），只有卷云时也为正，
+  // 于是「无低云可遮」被误判成「低云之下」（审查 P2）。
+  //
+  // `cloudBaseM` 也不适合用来写文案：同一张卡片的页脚用 925hPa 报低云底，
+  // 若这里用 cloudBaseM，线上实测会出现「仍在云底 10643m 之下」与页脚
+  // 「低云底约 811m」并存的自相矛盾。统一用 lowBase（925hPa 参照）。
   const hasLowCloud = useMemo(
     () => p.layers.some((l) => (l.key === '1000' || l.key === '925' || l.key === '850') && l.cover > 5),
     [p.layers],
   );
-  const aboveCloudBase = !hasLowCloud || observerMsl > p.cloudBaseM;
+  const aboveCloudBase = !hasLowCloud || observerMsl > lowBase;
 
   const clock = localClock(p.timeline.peakMs, p.timezoneOffsetSeconds);
 
@@ -127,8 +132,8 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
               ok={aboveCloudBase}
               text={
                 aboveCloudBase
-                  ? `已升至云底 ${Math.round(p.cloudBaseM)}m 之上，视野越过低云`
-                  : `仍在云底 ${Math.round(p.cloudBaseM)}m 之下，可能被低云遮挡`
+                  ? `已升至低云底 ${Math.round(lowBase)}m 之上，视野越过低云`
+                  : `仍在低云底 ${Math.round(lowBase)}m 之下，可能被低云遮挡`
               }
             />
           ) : (

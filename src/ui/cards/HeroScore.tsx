@@ -54,7 +54,12 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
           </div>
 
           <div className="flex shrink-0 flex-col items-end gap-1">
-            <ConfidenceBadge value={p.confidence} uncertainty={p.uncertainty} completeness={p.completeness} />
+            <ConfidenceBadge
+              value={p.confidence}
+              disagreement={p.modelDisagreement}
+              uncertainty={p.uncertainty}
+              completeness={p.completeness}
+            />
             {p.veto.active && (
               <span className="flex max-w-[220px] items-center gap-1.5 rounded-lg border border-rose-400/35 bg-rose-950/45 px-2 py-1 text-[10px] leading-tight text-rose-200">
                 <WarnIcon />
@@ -69,7 +74,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
           <div>
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
               鲜艳度指数
-              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的可达上限约 1.15）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
+              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的实测可达上限约 1.09）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
             </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span
@@ -232,10 +237,14 @@ function HeroStat({ label, value, sub }: { label: string; value: string; sub?: s
 
 function ConfidenceBadge({
   value,
+  disagreement,
   uncertainty,
   completeness,
 }: {
   value: number;
+  /** 纯模型分歧度 —— 置信度公式里乘的就是它，不是 uncertainty */
+  disagreement: number;
+  /** 综合不确定性 = 0.8·分歧 + 0.6·(1−完整度)，含数据缺失 */
   uncertainty: number;
   completeness: number;
 }) {
@@ -244,10 +253,20 @@ function ConfidenceBadge({
   const ringLen = 2 * Math.PI * 11;
   // 完整度低于 0.7 时明确提示"数据不全"，避免用户把低置信误读成"预报不稳定"
   const dataWarning = completeness < 0.7;
+  // tooltip 必须能**从展示的数字反算回置信度**，否则就是误导。
+  // 上一版这里写的是 `uncertainty`，但置信度公式用的是分歧度 ——
+  // 线上曾出现「分歧 38%」而 100%×(1−0.55×0.38)=79%，环形图却显示 74%。
+  const formula = `置信度 ${pct}% = 数据完整度 ${(completeness * 100).toFixed(0)}% × (1 − 0.55 × 模型分歧 ${(
+    disagreement * 100
+  ).toFixed(0)}%)`;
   return (
     <div
       className="flex items-center gap-2 rounded-xl border border-white/12 bg-black/25 px-2.5 py-1.5 backdrop-blur-sm"
-      title={`置信度 = 数据完整度(${(completeness * 100).toFixed(0)}%) × (1 − 0.55·模型分歧(${(uncertainty * 100).toFixed(0)}%))`}
+      title={
+        dataWarning
+          ? `${formula}。另有综合不确定性 ${(uncertainty * 100).toFixed(0)}%，其中数据缺失占主要部分。`
+          : `${formula}。综合不确定性 ${(uncertainty * 100).toFixed(0)}%。`
+      }
     >
       <div className="relative grid h-6 w-6 place-items-center">
         <svg viewBox="0 0 26 26" className="absolute inset-0 -rotate-90">
@@ -272,7 +291,7 @@ function ConfidenceBadge({
       <div className="leading-none">
         <div className="text-[8.5px] font-semibold uppercase tracking-[0.1em] text-white/50">置信度</div>
         <div className="num mt-0.5 text-[10px] font-medium text-white/80">
-          {dataWarning ? `数据仅 ${(completeness * 100).toFixed(0)}%` : `分歧 ${(uncertainty * 100).toFixed(0)}%`}
+          {dataWarning ? `数据仅 ${(completeness * 100).toFixed(0)}%` : `分歧 ${(disagreement * 100).toFixed(0)}%`}
         </div>
       </div>
     </div>

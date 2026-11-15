@@ -154,7 +154,7 @@ Path 2 使用有实际贡献云块的代表高度与距离，并按可见面积�
 - **Canvas**：自研 2D 光路剖面渲染器（`src/render/sectionRenderer.ts`）
 - **状态**：Zustand
 - **数据**：Open-Meteo（ECMWF IFS / NOAA GFS / DWD ICON）+ CAMS 气溶胶 + Copernicus DEM
-- **测试**：Vitest，**293 个用例**（校准 13 · 物理单元 36 · 不变量 48 · 回归 133 · 集合 11 · 验证指标 27 · 极区 3）
+- **测试**：Vitest，**296 个用例**（校准 12 · 物理单元 36 · 不变量 48 · 回归 139 · 集合 11 · 验证指标 30 · 审查修复 13 · 数据竞态 4 · 极区 3）
 
 ## 目录结构
 
@@ -214,7 +214,7 @@ aetherglow/
     ├── validation.metrics.test.ts # 验证指标定义（30）
     ├── calibrationScenarios.ts    # 典型场景与逐环覆盖夹具
     ├── calibration.test.ts        # 校准回归（12）
-    ├── audit-fixes.test.ts        # 本轮光路与缺测修复（10）
+    ├── audit-fixes.test.ts        # 光路、缺测与语义混用修复（13）
     ├── data-race.test.ts          # 数据取消隔离与边界（3）
     ├── store-race.test.ts         # 地点切换请求竞态（1）
     └── polar.test.ts              # 极区边界（3）
@@ -228,7 +228,7 @@ aetherglow/
 npm install
 npm run dev        # http://127.0.0.1:5199
 npm run build      # 类型检查 + 生产构建
-npm test           # 293 个测试
+npm test           # 296 个测试
 npm run validate   # 用实测标签评估准确率（见下方「验证」）
 ```
 
@@ -336,7 +336,7 @@ Open-Meteo 会**接受很多参数名但恒返回 null**。下表全部经过逐
 
 **标尺层**
 
-- 「世纪大烧」(vividness > 1.5) 在当前合成校准场景范围内尚未达到；这只是样本覆盖结论，不是物理不可达证明。要提高分级辨识度仍需云光学厚度等更精细数据与实测校准
+- 「世纪大烧」(vividness > 1.5) 在当前数据模型下不可达：168 组网格搜索的实测上限约 **1.09**（`scratch/ceiling-probe.ts` 可复现）。这是样本与数据源的共同边界，不是物理不可达证明。要提高分级辨识度仍需云光学厚度等更精细数据与实测校准
 - `dual.burnProbability` 与 `gradeIfBurn` 目前是**未校准**估计（`calibration=0`）
 
 **验证层**

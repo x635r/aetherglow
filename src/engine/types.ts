@@ -344,7 +344,7 @@ export interface DualHeadEstimate {
 
 export interface SunsetPredictionOutput {
   // ── 核心量化 ────────────────────────────────
-  /** 鲜艳度指数 0.00 ~ 1.6+（当前数据模型可达上限约 1.15） */
+  /** 鲜艳度指数 0.00 ~ 1.6+（当前数据模型实测可达上限约 1.09） */
   vividness: number;
   /** 双头估计（会不会烧 / 烧多大） */
   dual: DualHeadEstimate;
@@ -355,8 +355,20 @@ export interface SunsetPredictionOutput {
   gradeEn: string;
   /** 置信度 0~1（= 多模型一致性 × 数据完整度） */
   confidence: number;
-  /** 分歧度 0~1 */
+  /**
+   * 综合不确定性 0~1 = `0.8·模型分歧 + 0.6·(1−数据完整度)`。
+   *
+   * **不是**分歧度本身：完整度不足也会推高它。UI 若要展示「模型分歧」，
+   * 必须用 `modelDisagreement`，否则会与置信度公式里的系数对不上
+   * （线上实测：页面显示分歧 38%，但置信度 74% 对应的是 47.5%）。
+   */
   uncertainty: number;
+  /**
+   * 纯模型分歧度 0~1（峰值极差 /（极差 + 0.55），仅在 ≥2 个云量完整度
+   * 合格的模型之间计算）。无可比模型时为 0，此时由 `confidence` 的
+   * 完整度因子单独表达不确定性。
+   */
+  modelDisagreement: number;
   /** 数据完整度 0~1（云场 / 气溶胶 / 能见度 / 地形 的加权覆盖率） */
   completeness: number;
   /** 多模型一致性 0~1（纯峰值收敛度，不含数据完整度） */

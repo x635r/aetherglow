@@ -2080,13 +2080,17 @@ function vividnessOf(
   //   ② 只有一个全局乘子，不做分档修正 —— 一旦分档修正，就是在往物理里掺拟合；
   //   ③ 标定锚点写进 `tests/calibration.test.ts`，改动必须同步更新测试。
   //
-  // 定标锚点（P0-1 修复后实测）：
-  //   · 洁净天空 · 45% 黄金层        → 1.01（大烧）
-  //   · 卷云+高积云双层 · 大烧典型    → 0.97（不完美大烧 ~ 大烧）
-  //   · 黄金层 + 满铺卷云 · 天花板    → 1.05（特大烧）
-  //   · 水晶天 · 低 AOD 高能见度      → 1.06（特大烧）
-  //   · 网格搜索绝对上限              → 1.15（特大烧上沿）
-  //   · 整层阴天 / 低云锁死          → 0.009（无烧）
+  // 定标锚点（2026-11-15 由 `scratch/anchor-probe.ts` 实测复现，
+  // 10 个校准场景 + `scratch/ceiling-probe.ts` 168 组网格搜索）：
+  //   · 洁净天空 · 45% 黄金层        → 0.894（大烧）
+  //   · 黄金层 + 满铺卷云 · 双层大烧  → 0.917（大烧）
+  //   · 水晶天 · 低 AOD 高能见度      → 0.950（大烧）
+  //   · 卷云+高积云双层 · 大烧典型    → 0.870（大烧）
+  //   · 纯净卷云满铺 · 紫霞型        → 0.526（中烧）
+  //   · 网格搜索绝对上限              → 1.094（大烧上沿）
+  //   · 低云满铺 / 整层阴天          → 0.010 / 0.063（无烧 ~ 微烧）
+  //
+  // 改注释里的锚点前先跑那两个脚本 —— 手写的数字会和物理一起过期。
   const VIVIDNESS_SCALE = 1.31;
   let v = VIVIDNESS_SCALE * sum * stage * spectral.saturationGain * spectral.hazePenalty * purity * snap.observedContrast;
 
@@ -2849,6 +2853,7 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
     gradeEn: grade.en,
     confidence,
     uncertainty,
+    modelDisagreement: disagreement,
     completeness,
     modelAgreement: agreement,
 

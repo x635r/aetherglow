@@ -137,6 +137,66 @@ describe('审查修复：缺测与模型一致性', () => {
   });
 });
 
+describe('审查修复：线上实跑暴露的语义混用', () => {
+  // 线上实测（上海 · 外滩 2026-11-15）：页面同时出现
+  // 「仍在云底 10643m 之下」与「低云底约 811m」—— 同一卡片两个数字互相矛盾。
+  // 根因：`cloudBaseM` 是「≥20% 覆盖的最低一层」，晴天只剩卷云时它是 10.6km，
+  // 但被当成「低云底」用于模拟器状态提示。
+  it('cloudBaseM 是任意层最低云底，不是低云底', () => {
+    const b = buildScenario(scenario({ cover: { '250': 1.0 } }));
+    const profile = parseVerticalCloudProfile(b, 'ecmwf', EVENT);
+    // 只有 250hPa 卷云：cloudBaseM 等于卷云高度（约 10.4km）
+    expect(profile.cloudBaseM).toBeGreaterThan(9000);
+    // 低云（925/850）此时根本没有云 —— 两者语义必须能区分开
+    expect(profile.local.cover['925']).toBe(0);
+    expect(profile.local.cover['850']).toBe(0);
+  });
+
+  // 线上实测同一屏：页首环形图显示「置信度 74」，tooltip 却写
+  // 「完整度 100% × (1 − 0.55·分歧 38%)」= 79%，两者反算不回去。
+  // 根因：UI 把 `uncertainty`（= 0.8·分歧 + 0.6·数据缺失）当作分歧度展示，
+  // 而置信度公式里乘的是纯分歧度。
+  it('置信度必须能由 modelDisagreement 反算回来', () => {
+    const a = buildScenario(scenario({ cover: { '600': 0.45, '500': 0.4 } }), 'ecmwf');
+    const g = buildScenario(scenario({ cover: { '600': 0.95, '500': 0.9, '400': 0.9 } }), 'gfs');
+    a.models.gfs = g.models.gfs;
+    const p = predict(a, 'ecmwf', ['ecmwf', 'gfs']);
+
+    // 综合不确定性 = 0.8·分歧 + 0.6·(1−完整度)，是另一种量
+    expect(p.modelDisagreement).toBeGreaterThan(0.2);
+    expect(p.uncertainty).not.toBeCloseTo(p.modelDisagreement, 3);
+    // 置信度只由完整度与纯分歧决定
+    expect(p.confidence).toBeCloseTo(
+      Math.min(0.97, p.completeness * (1 - 0.55 * p.modelDisagreement)),
+      10,
+    );
+    // 单模型场景：没有可比对象 → 分歧为 0，但一致性是中性的 0.5
+    const solo = predict(buildScenario(scenario({ cover: { '600': 0.5 } })));
+    expect(solo.modelDisagreement).toBe(0);
+    expect(solo.modelAgreement).toBe(0.5);
+  });
+
+  // 模型不可比（云量完整度不足）时不得把缺测模型的峰值算进分歧 ——
+  // 那是"没数据"，不是"模型打架"。
+  it('云量完整度不足的模型不参与分歧统计', () => {
+    const b = buildScenario(scenario({ cover: { '600': 0.45 } }));
+    const g = buildScenario(scenario({ cover: { '600': 0.95, '500': 0.9 } }), 'gfs');
+    b.models.gfs = g.models.gfs;
+    for (const ring of b.models.gfs.rings) {
+      for (const s of ring.samples) {
+        const valid = {} as NonNullable<typeof s.cloudValid>;
+        for (const k of LEVEL_KEYS) valid[k] = false;
+        s.cloudValid = valid;
+      }
+    }
+    const p = predict(b, 'ecmwf', ['ecmwf', 'gfs']);
+    // 只剩一个可比模型 → 分歧 0（而不是把"gfs 全缺测"当成巨大分歧）
+    expect(p.modelDisagreement).toBe(0);
+    // 但完整度确实因为 gfs 缺测而下降
+    expect(p.completeness).toBeLessThan(1);
+  });
+});
+
 describe('审查修复：连续光谱与方位边界', () => {
   it('真实 AOD=0 是洁净数据而不是缺测或数值异常', () => {
     const s = evaluateSpectral(0, 6, 4, 42, 32, true, 20);
