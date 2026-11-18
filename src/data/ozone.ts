@@ -60,28 +60,37 @@ export async function fetchOzoneColumn(
     const raw = localStorage.getItem(cacheKey);
     if (raw) {
       const parsed = JSON.parse(raw) as { t: number; v: OzoneEstimate | null };
-      if (Date.now() - parsed.t < OZONE_CACHE_TTL_MS) return parsed.v;
+      // **null 不得命中缓存**（P1 修复）：上一版把网络失败的结果也写进
+      // localStorage，于是整整 12 小时内每一次预测都拿到 null，
+      // 即使用户点「强制刷新」也救不回来（缓存仍算有效）。
+      if (parsed.v != null && Date.now() - parsed.t < OZONE_CACHE_TTL_MS) return parsed.v;
     }
   } catch {
     /* 无缓存也能跑 */
   }
-  const existing = ozoneInflight.get(cacheKey);
+  // **带 AbortSignal 的调用不共享 in-flight**（P1 修复，与 openMeteo / ensemble 一致）：
+  // 一个被取消的查询不该连带中断同 key 的其他正常调用。
+  const shared = !signal;
+  const existing = shared ? ozoneInflight.get(cacheKey) : undefined;
   if (existing) return existing;
 
   const task = (async (): Promise<OzoneEstimate | null> => {
     const v = await fetchOzoneUncached(point, nearMs, signal);
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), v }));
-    } catch {
-      /* 配额溢出：放弃缓存 */
+    // 只有真实值才落盘 —— 失败就留空，下次请求自然重试
+    if (v != null) {
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), v }));
+      } catch {
+        /* 配额溢出：放弃缓存 */
+      }
     }
     return v;
   })();
-  ozoneInflight.set(cacheKey, task);
+  if (shared) ozoneInflight.set(cacheKey, task);
   try {
     return await task;
   } finally {
-    ozoneInflight.delete(cacheKey);
+    if (shared && ozoneInflight.get(cacheKey) === task) ozoneInflight.delete(cacheKey);
   }
 }
 

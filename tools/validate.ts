@@ -392,7 +392,13 @@ async function main(): Promise<void> {
         timezone: res.tzName,
         locationLabel: `${row.lat},${row.lon}`,
         eventMs: resolved.eventMs,
-        daily: { sunriseMs: null, sunsetMs: resolved.eventMs },
+        // **必须按 mode 填对字段**（P2 修复）：上一版无论朝霞晚霞都写
+        // `sunriseMs: null`，于是所有朝霞样本在引擎里都是"今日无日出"，
+        // 走极昼/极夜兜底分支 —— 样本外校准的朝霞部分完全无效。
+        daily:
+          row.mode === 'sunrise'
+            ? { sunriseMs: resolved.eventMs, sunsetMs: null }
+            : { sunriseMs: null, sunsetMs: resolved.eventMs },
         eventExists: resolved.exists,
         compareModels: ['ecmwf', 'gfs', 'icon'],
       });

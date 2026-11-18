@@ -109,7 +109,7 @@ export const STAGE_KNOTS: Array<[number, number]> = [
  * 这是唯一的偏离，已在文档中说明。
  *
  * 另外「世纪大烧」(>1.5) 在本引擎当前数据模型下物理不可达
- * —— 实测上限约 1.09（见 VIVIDNESS_CEILING 注释）。这是诚实的局限。
+ * —— 实测上限约 1.10（见 VIVIDNESS_CEILING 注释）。这是诚实的局限。
  */
 export const GRADES = [
   // 低端：SunsetBot 的尺度从 0.001 起就算「微烧」，但那是给"云幕通了但没烧"
@@ -137,8 +137,8 @@ export type GradeKey = (typeof GRADES)[number]['key'];
  *
  * 与「模型可达上限」是两回事，不要混为一谈：
  *   · 显示上限 = 1.6（本常量，UI 分母）
- *   · 实测可达上限 ≈ 1.09（`scratch/ceiling-probe.ts` 网格搜索：
- *     600/500=0.40、300=0.85、AOD=0.01、VIS=30km 处取到 1.0938）
+ *   · 实测可达上限 ≈ 1.10（`scratch/ceiling-probe.ts` 网格搜索：
+ *     600/500=0.40、300=0.85、AOD=0.01、VIS=30km 处取到 1.1008）
  * 「世纪大烧」(>1.5) 需要云光学厚度/云相态数据才能达到，
  * 当前数据源（Open-Meteo 只给覆盖率）到不了。
  *

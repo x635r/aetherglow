@@ -38,8 +38,14 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   //
   // 判「机位是否越过云层」必须比**云顶**（审查 P2）：比云底会让
   // 「已在云层中间」显示成「低云之上」，与上面低云底/顶的注释自相矛盾。
+  //
+  // 阈值必须与引擎的 cloudSea 判定**完全一致**（P1 修复）：
+  // 引擎要求 `observerMslM > lowTopM + 120 && lowCoverLocal > 0.4`。
+  // 上一版这里只比 lowTop，于是 1550m 机位在 lowTop=1500m 时，
+  // 徽章显示「低云之上」而下方提示「尚未越过低云顶」—— 同一张卡片自相矛盾。
   const observerMsl = p.observerHeightM;
-  const aboveLow = observerMsl > lowTop;
+  const cloudSeaThresholdM = lowTop + 120;
+  const aboveLow = observerMsl > cloudSeaThresholdM;
   // 「云底」只在确实存在低云时才作为判据。
   // 上一版用 `cloudBaseM > 0` —— 但 cloudBaseM 是**任意层**的最低云底
   // （≥20% 覆盖的最低一层，可能是 250hPa 卷云），只有卷云时也为正，
@@ -146,12 +152,25 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
               accent="#38e8d0"
             />
           )}
-          {hasLowCloud && !p.cloudSeaReversal && h >= 900 && (
-            <StatusLine
-              ok={false}
-              text={`尚未越过低云顶（约 ${Math.round(lowTop)}m，850hPa 参考），继续抬高可触发云海成效`}
-              accent="#8ea0b8"
-            />
+          {/* 「云海还没形成」有两种完全不同的物理原因，必须分开说（P1 修复）。
+              上一版只判 `h >= 900`，于是把 2000m 机位（早已高于云顶）
+              也提示成「尚未越过低云顶」，与右上角「低云之上」徽章直接矛盾。
+              场景 A：机位确实还在云顶安全高度以下 → 该继续抬
+              场景 B：机位已越过云顶，但低云覆盖不足 40% → 抬也没用 */}
+          {hasLowCloud && !p.cloudSeaReversal && h >= 300 && (
+            observerMsl <= cloudSeaThresholdM ? (
+              <StatusLine
+                ok={false}
+                text={`尚未越过低云顶安全高度（约 ${Math.round(cloudSeaThresholdM)}m MSL = 850hPa 云顶 + 120m 余量），继续抬高可越过低云`}
+                accent="#8ea0b8"
+              />
+            ) : (
+              <StatusLine
+                ok={false}
+                text="已越过低云顶，但低云覆盖率不足 40%，未形成连续云海反射幕"
+                accent="#8ea0b8"
+              />
+            )
           )}
         </div>
       </div>

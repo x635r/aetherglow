@@ -208,7 +208,12 @@ export function AerosolGauge({ p }: { p: SunsetPredictionOutput }) {
         {s.crystal && (
           <div className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-teal-300/30 bg-teal-400/10 px-2 py-1">
             <CrystalIcon />
-            <span className="text-[10px] font-semibold text-teal-200">水晶天 · 饱和度 ×1.25</span>
+            {/* 增益必须**动态显示**（P2 修复）：spectral.ts 已改成连续公式，
+                实际增益在 ×1.15–×1.27 之间浮动，写死 1.25 会与仪表上的
+                真实数值不一致。 */}
+            <span className="text-[10px] font-semibold text-teal-200">
+              水晶天 · 饱和度 ×{s.saturationGain.toFixed(2)}
+            </span>
           </div>
         )}
         {!s.available && (

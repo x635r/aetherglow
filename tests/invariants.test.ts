@@ -411,14 +411,21 @@ describe('观测海拔与云底', () => {
     expect(prof.cloudTopM).toBeCloseTo(4200, 3);
   });
 
-  it('高原观测者不再被当作海平面', () => {
+  it('高原观测者不再被当作海平面，且地下等压面被过滤', () => {
     const b = ringBundle(() => ({ '925': 0.9, '850': 0.9, '600': 0.5 }), {
       terrain: [3650, 3700, 4000, 4500, 4800, 5200],
     });
-    const seaLevel = predict(b, 0);
     const onPlateau = predict(b, 0);
-    // 同样的 AGL=0，但 DEM 已把观测者放到云底之上
-    expect(onPlateau.observerHeightM).toBeGreaterThan(seaLevel.cloudBaseM);
+    // 观测者 MSL 必须等于地面 DEM（3650m），而不是被当成 0m 海平面
+    expect(onPlateau.observerHeightM).toBeGreaterThan(3000);
+    // **地下等压面必须被过滤**（P0 修复）：拉萨地面 3650m，
+    // 925hPa(780m) 与 850hPa(1500m) 都埋在岩石里。模式会为它们返回
+    // 非零云量，不过滤就会：① cloudBaseM 被算成地下的 780m；
+    // ② 地面站被误判成「站在云海之上」（3650 > 1500+120）。
+    // 过滤后最低有效云层是 600hPa（4200m），高于地面 550m ——
+    // 云底在观测者之上，才是拉萨的真实情形。
+    expect(onPlateau.cloudBaseM).toBeGreaterThan(3650);
+    expect(onPlateau.cloudSeaReversal).toBe(false);
   });
 });
 

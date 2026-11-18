@@ -30,16 +30,29 @@ export function RayMarchCard() {
     return () => ro.disconnect();
   }, []);
 
-  // 当前时刻的太阳高度角
+  // 当前时刻的太阳高度角。
+  //
+  // **坐标与事件时刻必须成对取自同一份数据**（P1 修复）：
+  // 切城市时 `query.point` 立刻变成新城市，而 `resolved` / `bundle` /
+  // `prediction` 还是旧城市 —— 上一版直接用 `query.point` 配可用的
+  // `resolved.eventMs`，等于「上海的日落时刻 + 伦敦的经纬度」，
+  // 加载的 1–2 秒里剖面图会画出完全错误的太阳高度角。
+  //
+  // 优先用已完成的预测结果（同源快照），没有时才退回当前查询。
+  const activePoint = p?.point ?? query.point;
+  const baseEventMs = p?.eventMs ?? resolved?.eventMs ?? null;
+  const activeModel = p?.primaryModel ?? query.primaryModel;
+  const activeCot = p?.debug.cotFactor;
+
   const timeMs = useMemo(() => {
-    if (!resolved) return Date.now();
-    return resolved.eventMs + scrubMin * 60000;
-  }, [resolved, scrubMin]);
+    if (baseEventMs == null) return Date.now();
+    return baseEventMs + scrubMin * 60000;
+  }, [baseEventMs, scrubMin]);
 
   const sun = useMemo(() => {
-    if (!query.point) return { altitude: 0, azimuth: 0 };
-    return sunPosition(timeMs, query.point.lat, query.point.lon);
-  }, [timeMs, query.point]);
+    if (!activePoint) return { altitude: 0, azimuth: 0 };
+    return sunPosition(timeMs, activePoint.lat, activePoint.lon);
+  }, [timeMs, activePoint]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -57,16 +70,16 @@ export function RayMarchCard() {
 
     hitsRef.current = renderSection(ctx, size.w, size.h, {
       bundle,
-      model: query.primaryModel,
+      model: activeModel,
       timeMs,
       sunAltitudeDeg: sun.altitude,
       observerHeightM: query.observerHeightM,
       focusLevel,
       // 与主评分同源：COT 乘子来自预测结果，平流修正用当前帧太阳方位
-      cotFactor: p?.debug.cotFactor,
+      cotFactor: activeCot,
       sightAzimuthDeg: sun.azimuth,
     });
-  }, [bundle, size.w, size.h, query.primaryModel, timeMs, sun.altitude, sun.azimuth, query.observerHeightM, focusLevel, p?.debug.cotFactor]);
+  }, [bundle, size.w, size.h, activeModel, timeMs, sun.altitude, sun.azimuth, query.observerHeightM, focusLevel, activeCot]);
 
   useEffect(() => {
     draw();
@@ -113,7 +126,7 @@ export function RayMarchCard() {
           <span className="num hidden rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[10.5px] text-slate-300 sm:block">
             {clock} · {offsetLabel}
           </span>
-          <InfoTip text="光路几何 H_ray(d) = H_target + d·tanα + d²/(2·R_eff)，R_eff = 7435km（含标准大气折射）。地形高于光线即判定遮挡。「远端 T」是光线走完 0–450km 后的剩余份额。" />
+          <InfoTip text="光路几何 H_ray(d) = H_target + d·tanα + d²/(2·R_eff)，R_eff = 7435km（含标准大气折射）。地形高于光线即判定遮挡。环标签上的百分比是该环云幕的**受光比例**，不是剩余透过率。" />
         </div>
       }
       bodyClass="!pt-1"

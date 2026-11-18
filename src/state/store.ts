@@ -161,6 +161,27 @@ export const useStore = create<Store>((set, get) => ({
     } else {
       set((s) => ({ query: { ...s.query, models: [...cur, m] } }));
     }
+
+    // **不要为了切换图表可见性而重新联网**（P1 修复）。
+    //
+    // 首次加载时三个模型的数据已经全部存进 `bundle.models`，缓存键为
+    // `...|ecmwf-gfs-icon`。关掉 GFS 后若调 `load()`，缓存键变成
+    // `...|ecmwf-icon`，与前者不匹配 ⇒ 全屏 loading + 重发
+    // forecast/air-quality/elevation/ensemble 四个请求（约 166 配额单位），
+    // 而用户只是想隐藏一条曲线。
+    const bundle = get().bundle;
+    const nextModels = get().query.models;
+    const allLoaded =
+      bundle != null &&
+      nextModels.every((id) => {
+        const ds = bundle.models[id];
+        return !!ds && ds.rings.length > 0;
+      });
+    if (allLoaded) {
+      // 数据已在内存：只重算展示层，不发网络请求
+      get().recompute();
+      return;
+    }
     void get().load();
   },
 

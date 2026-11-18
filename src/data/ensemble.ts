@@ -531,16 +531,26 @@ async function fetchEnsembleProbabilityUncached(
       if (!usable || wsum <= 0) continue;
       hasValidTimeStep = true;
 
-      // 集合只给 low/mid/high 三层；把 mid 拆成 700+600、high 拆成 400+300
-      const goldenCover = mid * 0.7;
-      const midOnly = mid * 0.3;
-      const highCover = high;
+      // 集合只给 low/mid/high 三层聚合覆盖率。
+      //
+      // **云量是面积占比，不是可以按比例切分的质量**（P0 修复）。
+      // 上一版写 `midOnly = mid * 0.3` / `goldenCover = mid * 0.7`，于是
+      // 传进 memberScore 的 mid 恒 ≤0.30、golden 恒 ≤0.70 —— 使
+      // `overcast = mid > 0.85 && golden > 0.8 && high > 0.85` **数学上永不成立**，
+      // 整层阴天否决彻底失效。沙盒实测：100% 中高云满铺得 0.7893（大烧），
+      // 正确应为 0.1358（无烧）。
+      //
+      // 中云满铺意味着 700 与 600hPa 的覆盖率**都**接近 1.0，所以
+      // mid 与 golden 都取真实中云覆盖率。
+      const midCover = mid / wsum;
+      const goldenCover = midCover;
+      const highCover = high / wsum;
 
       const score = memberScore(
         low / wsum,
-        midOnly / wsum,
-        highCover / wsum,
-        goldenCover / wsum,
+        midCover,
+        highCover,
+        goldenCover,
         direct / wsum,
         diffuse / wsum,
         precip / wsum,

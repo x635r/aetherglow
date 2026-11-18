@@ -233,7 +233,18 @@ export interface RingReport {
 
 export interface VetoFlag {
   active: boolean;
-  kind: 'cloud-wall' | 'terrain' | 'low-cloud-lock' | 'fog' | 'haze' | 'overcast' | 'none';
+  kind:
+    | 'cloud-wall'
+    | 'terrain'
+    | 'low-cloud-lock'
+    | 'fog'
+    | 'haze'
+    | 'overcast'
+    /** 强对流积雨云黑幕（CAPE + 降水 + 深厚云体） */
+    | 'deep-convection'
+    /** 中高层厚云幕（600/500/400hPa 三层满铺） */
+    | 'thick-deck'
+    | 'none';
   title: string;
   detail: string;
   /** 惩罚系数 */
@@ -344,7 +355,7 @@ export interface DualHeadEstimate {
 
 export interface SunsetPredictionOutput {
   // ── 核心量化 ────────────────────────────────
-  /** 鲜艳度指数 0.00 ~ 1.6+（当前数据模型实测可达上限约 1.09） */
+  /** 鲜艳度指数 0.00 ~ 1.6+（当前数据模型实测可达上限约 1.10） */
   vividness: number;
   /** 双头估计（会不会烧 / 烧多大） */
   dual: DualHeadEstimate;

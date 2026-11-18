@@ -881,7 +881,14 @@ function hasRealGph(responses: Array<OmPointResponse | undefined>): boolean {
  *  · 逐样本、逐环匹配（按时间戳找最近样本），不做外推
  */
 function backfillModelScalars(datasets: Record<ModelId, ModelDataset>, models: ModelId[]): void {
-  const fields = ['boundaryLayerM', 'freezingLevelM'] as const;
+  // **补齐清单必须覆盖所有「部分模型恒为 null」的标量**（P1 修复）。
+  //  · boundaryLayerM         仅 GFS 提供
+  //  · freezingLevelM         ECMWF 无
+  //  · visibilityM            ECMWF / ICON 全 null（只有 GFS 有）
+  //  · totalColumnWaterVapour ICON 全 null
+  // 漏掉后两项的后果：每次插值都要在引擎里现场跨模型借（约 95 次/预测），
+  // 且 ICON 作主源时 tcwvFactor 静默失效为 1（吸湿增长完全不生效）。
+  const fields = ['boundaryLayerM', 'freezingLevelM', 'visibilityM', 'totalColumnWaterVapour'] as const;
   for (const m of models) {
     const ds = datasets[m];
     if (!ds?.rings.length) continue;

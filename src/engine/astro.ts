@@ -303,6 +303,17 @@ export function sampleAdvected(
  * 只取**沿视线方向**的投影：垂直视线方向的平流会把云推走而不是推来，
  * 那不是我们想补偿的相位差。
  *
+ * **方向约定（曾经的 P0 缺陷，别写反）**：
+ *  · `sightDeg` 是**观测者 → 太阳/远端采样环**的方位角
+ *  · `windFromDeg` 是气象风向（**来向**）
+ *  · 当 `windFromDeg === sightDeg` 时，风正从远端环那个方向吹来、
+ *    吹向观测者 —— 这才是「云朝本地来」，需要回看上游。
+ *
+ * 上一版先算 `motionDeg = windFromDeg + 180`（运动方向）再与 sightDeg 求余弦，
+ * 等价于把判据翻成「风从观测者吹向太阳」，方向整整反了 180°。
+ * 后果（实测）：真实「云朝本地来」返回 0（不修正），而「云正在离开」
+ * 反而被平移 30 分钟 —— 峰值时刻系统性错位。
+ *
  * @param windFromDeg 风向（**气象约定**：风的来向，°）
  * @param windSpeedKmh 风速 km/h
  * @param sightDeg    视线方位（太阳方位，°）
@@ -316,17 +327,22 @@ export function advectionLagMs(
   ringKm: number,
 ): number {
   if (!Number.isFinite(windFromDeg) || !Number.isFinite(windSpeedKmh)) return 0;
-  if (windSpeedKmh <= 0.5) return 0;
+  // 5 km/h 以下的风产生不了可分辨的格内位移
+  if (windSpeedKmh <= 5) return 0;
+  // 本地环没有「相对环距」，谈不上把远端的云移到本地。
+  // 上一版在这里硬编码 0.5h，造成 0km→30min、10km→6min、30km→18min 的
+  // 非单调 V 型畸变（本地比近场还晚半小时）。
+  if (ringKm <= 1) return 0;
 
-  // 气象风向是"来向"：风从 X 吹来 ⇒ 运动方向是 X + 180°。
-  const motionDeg = (windFromDeg + 180) % 360;
-  // 运动方向在视线方向上的投影（+1 = 朝观测者吹来，-1 = 吹走）
-  const along = Math.cos(toRad(motionDeg - sightDeg));
-  // 只有"朝本地吹来"才需要回看上游（along > 0）
-  if (along <= 0.05) return 0;
+  // 风的来向与视线方向一致 ⇒ 风把远端云吹向观测者
+  const toward = Math.cos(toRad(windFromDeg - sightDeg));
+  if (toward <= 0.05) return 0;
 
-  const vAlong = windSpeedKmh * along;
-  const travelHours = ringKm > 1 ? ringKm / Math.max(vAlong, 1) : 0.5;
-  // 上限半格（1 小时数据取 30min），避免整格平移造成的反向偏置
-  return clamp(travelHours, 0, 0.5) * 3600 * 1000;
+  const vAlong = Math.max(windSpeedKmh * toward, 1);
+  // 位移尺度取**次网格特征尺度**：0.25° 格点约 25km，取半格 12.5km
+  // 作为「格内相位微调」上限。直接用整环距（450km/100kmh = 4.5h）会把
+  // 数值模式已经平流过的量再延迟一遍，且远超数据本身的分辨率。
+  const subGridKm = Math.min(ringKm, 12.5);
+  const travelHours = subGridKm / vAlong;
+  return clamp(travelHours, 0, 0.25) * 3600 * 1000;
 }

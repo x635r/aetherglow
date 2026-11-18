@@ -83,7 +83,14 @@ export function renderSection(
   const xOf = (km: number) => padL + (km / MAX_KM) * plotW;
   const yOf = (altM: number) => plotBottom - (altM / 1000 / MAX_ALT_KM) * plotH;
 
-  const curvature = (km: number) => -((km * km) / (2 * 6371.0088)) * 1000 * gain;
+  // 曲率下沉量**仅供标注**（例如在地平线处显示「已下沉 X km」）。
+  //
+  // **不要把它加到地形/等压面/云带/观测者的 y 坐标上**（P2 修复）。
+  // 引擎所有高度量都在展平海拔坐标系里，光路的 d²/2R 项已经表达了
+  // 地球弯曲；再给地形单独加一次曲率会让地面与光路分处两套坐标系，
+  // 撞山交点与计算值对不上。详见第 3 节注释。
+  const curvatureDropKm = (km: number) => (km * km) / (2 * 6371.0088);
+  void gain;
 
   const hits: HitRegion[] = [];
 
@@ -130,10 +137,20 @@ export function renderSection(
     ctx.setLineDash([]);
   }
 
-  // ══ 3. 地形（含曲率）═════════════════════════════════════════════════
+  // ══ 3. 地形 ══════════════════════════════════════════════════════════
+  //
+  // **坐标系必须统一为「展平的海拔 MSL」**（P2 修复）。
+  //
+  // 引擎里所有高度量（等压面 heightM、光路 H_ray(d) = H₀ + d·tanα + d²/2R）
+  // 都定义在**展平坐标系**中，曲率项已经把地球下沉折进了抛物线光路里。
+  // 上一版给地形额外加了 `curvature(km)`（450km 处 −15.9km × gain），
+  // 而等压面虚线与云带画成水平线、光路画成上翘抛物线 —— 于是同一张图上
+  // 地面在向下坠落、光线在飞向太空，撞山交点与计算值对不上。
+  //
+  // 地形直接画真实海拔即可：光路与地形求交就是精确的撞山点。
   const terrainPts = section.profile.rings.map((r, i) => {
     const terr = bundle.terrain[i]?.elevationM ?? 0;
-    return { km: r.ringKm, alt: terr + curvature(r.ringKm), terr };
+    return { km: r.ringKm, alt: terr, terr };
   });
 
   const groundGrad = ctx.createLinearGradient(0, padT + plotH * 0.65, 0, plotBottom);
@@ -390,7 +407,8 @@ export function renderSection(
   for (const s of section.stations) {
     const x = xOf(s.ringKm);
     const rayY = yOf(s.rayHeightM);
-    const terrY = yOf(s.terrainM + curvature(s.ringKm));
+    // 与地形、等压面同一坐标系（展平海拔），不再叠加曲率
+    const terrY = yOf(s.terrainM);
 
     // 地形 → 光路 的连接（表示该环的垂直剖面）
     if (!s.terrainBlocked) {
@@ -488,7 +506,7 @@ export function renderSection(
   // 上一版直接用 AGL —— 高原城市（地面 3650m、机位 0m AGL）会被画到
   // 海平面上，视觉上比 780m 的低云还低 2.8km（审查 P2）。
   const ox = xOf(0);
-  const oy = yOf(section.observerMslM + curvature(0));
+  const oy = yOf(section.observerMslM);
   ctx.beginPath();
   ctx.moveTo(ox, oy - 9);
   ctx.lineTo(ox - 6, oy + 1);

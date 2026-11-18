@@ -71,6 +71,7 @@ import {
   inferCloudOpticalDepth,
   cotCalibrationFactor,
   inferCloudOpticalDepthFromRadiation,
+  COT_MIN_SUN_ALT_DEG,
 } from './optics';
 import { angstromFromAod, evaluateSpectral, visibilityFromAod } from './spectral';
 import type {
@@ -383,6 +384,8 @@ export interface VerticalProfile {
   local: {
     cover: Record<LevelKey, number>;
     heightM: Record<LevelKey, number>;
+    /** 本地地表高程 MSL (m) —— 用于区分「抬升到云上」与「本来就在高原」 */
+    groundMslM: number;
     precipitation: number;
     humidity: number;
     visibilityM: number;
@@ -564,17 +567,35 @@ export function parseVerticalCloudProfile(
   sightAzimuthDeg?: number,
 ): VerticalProfile {
   const ds = bundle.models[model];
-  const rings: ProfileRing[] = ds.rings.map((r) => {
+  const rings: ProfileRing[] = ds.rings.map((r, ringIdx) => {
     const s = interpolateHourly(r.samples, timeMs, sightAzimuthDeg, r.ringKm);
     const cover = {} as Record<LevelKey, number>;
     const heightM = {} as Record<LevelKey, number>;
     const visible = {} as Record<LevelKey, boolean>;
     const tempC: Partial<Record<LevelKey, number>> = {};
     const rh: Partial<Record<LevelKey, number>> = {};
+
+    // **地下等压面必须清零**（P0 修复）。
+    //
+    // 数值预报会对低于地形的等压面做外推，返回非零的 cloud_cover。
+    // 拉萨（地面 3650m）的 1000/925/850/700hPa 全部在岩石里，却带着云量。
+    // 不清零会导致：
+    //   · 地面站被误判成「站在云海之上」（observerMsl 3650 > lowTop 1500+120）
+    //     → cloudSeaReversal 假触发，白送 +0.16 鲜艳度
+    //   · cloudBaseM 被算成地下的 780m，UI 显示「低云底 780m」
+    // 判据用当地环的地形高程（该环自己的 DEM），不是观测者海拔。
+    const ringTerrainM = Math.max(
+      bundle.terrain[ringIdx]?.elevationM ?? bundle.localElevationM ?? 0,
+      0,
+    );
+    const undergroundLimitM = ringTerrainM + 20;
+
     for (const k of LEVEL_KEYS) {
-      cover[k] = clamp(s.cloud[k] / 100, 0, 1);
       heightM[k] = s.levelHeightM[k];
-      visible[k] = isVisibleFromObserver(heightM[k], observerHeightM, r.ringKm);
+      const isUnderground = heightM[k] < undergroundLimitM;
+      // 位于地下：模型外推值不可信，按「无云」处理（而不是当作真实观测）
+      cover[k] = isUnderground ? 0 : clamp(s.cloud[k] / 100, 0, 1);
+      visible[k] = !isUnderground && isVisibleFromObserver(heightM[k], observerHeightM, r.ringKm);
       const t = s.levelTempC?.[k];
       if (typeof t === 'number') tempC[k] = t;
       const h = s.levelHumidity?.[k];
@@ -677,6 +698,8 @@ export function parseVerticalCloudProfile(
     local: {
       cover,
       heightM,
+      // 本地地表高程：用于「抬升到云上」与「本来就在高原」的区分
+      groundMslM: Math.max(bundle.terrain[0]?.elevationM ?? bundle.localElevationM ?? 0, 0),
       precipitation: wpick((s) => s.precipitation),
       humidity: wpick((s) => s.humidity),
       visibilityM: borrowScalar('visibilityM'),
@@ -775,6 +798,14 @@ export interface RayMarchOptions {
   cotFactor?: number;
   /** 目标云块相对观测者的环距离；光路坐标会改为从该环出发 */
   originRingKm?: number;
+  /**
+   * 汇总字段 `transmittance` / `directTransmittance` 取哪一层作为参考。
+   *
+   * 默认 `'600'`（黄金层）—— 主评分与旧调用点都按它。
+   * 剖面图切到 300hPa 时必须显式传 `'300'`，否则图上标的是 300hPa
+   * 而读数仍是 600hPa 的值（P1 修复：上一版写死 `refLevel = '600'`）。
+   */
+  refLevel?: LevelKey;
 }
 
 /**
@@ -931,8 +962,32 @@ export function rayMarchingTransmittance(
     // 「黄金层 + 卷云 = 教科书级大烧」的行业共识相反。见 CLOUD_ELEMENT_BY_ROLE_KM。
     const elementKm = CLOUD_ELEMENT_BY_ROLE_KM[ROLE_OF(k)];
     const betaBlock = cloudBetaPerKm(k, thicknessKm) * phaseFactor * cotFactor;
-    const selfScale = isSelfBand ? Math.min(lengthKm, thicknessKm * 2) : lengthKm;
-    perLevelTau[k] = cloudLayerTau(coverEff, selfScale, betaBlock, elementKm);
+
+    if (isSelfBand) {
+      // **自消光只算一次，绝不按区间分段累加**（P1 修复 + 实测纠正）。
+      //
+      // 两个诉求看似冲突：
+      //   ① 头顶那团云照亮自己时，斜程不该随整条光路发散（否则 40% 覆盖的
+      //      黄金层会算出 τ≈114，整片天空漆黑）
+      //   ② 100km 外的同层云墙确实是遮挡体，不该被一起截断
+      //
+      // 上一版只用 `min(lengthKm, thicknessKm*2)` 满足 ①，牺牲了 ②；
+      // 我第一次的修法把区间拆成 near/far 两段各自求 τ 再相加 —— 那是**错的**：
+      // `cloudLayerDirectTransmittance` 在 D ≤ L 时饱和为 `(1−c)+c·e^(−βD)`，
+      // τ 对路径不是线性的，分段求和会把 τ 按段数放大（实测 29.8km 一段
+      // τ=3.00，拆成 24.7+5.1 两段变成 5.99，拆三段变 8.99）——
+      // 整层阴天因此从 faint 被抬成 minor。
+      //
+      // 正确口径：**同层云对自身光路只有一个 τ**。用全路径的覆盖率
+      // `coverEff`（已按水平距离加权，远端云墙的覆盖率自然包含在内），
+      // 但路径长度取「云体自身厚度」——云内穿行的斜程按厚度计，
+      // 而远端同层云的遮挡体现在 `coverEff` 里（满铺时 β_eff 更大）。
+      // 这样既不会分段放大，也不会像上一版那样把远端云墙覆盖率一起丢掉。
+      const selfPathKm = Math.min(thicknessKm * 2, Math.max(lengthKm, thicknessKm));
+      perLevelTau[k] = cloudLayerTau(coverEff, selfPathKm, betaBlock, elementKm);
+    } else {
+      perLevelTau[k] = cloudLayerTau(coverEff, lengthKm, betaBlock, elementKm);
+    }
   }
 
   // 降水：沿光路在最近 150km 的强降水额外叠加（用线性插值而非单环取值）
@@ -1152,7 +1207,8 @@ export function rayMarchingTransmittance(
   //
   // 有意义的标量是**参考层（黄金层）的有效照明度** —— 它按破碎云形式逐层累乘，
   // 且已包含黄昏散射分量，正是主评分里同一份数值。
-  const refLevel: LevelKey = '600';
+  // 参考层可由调用方指定（剖面图切层时必须与图上的目标层一致）
+  const refLevel: LevelKey = options.refLevel ?? '600';
   const transmittance = blockedAtKm !== null ? 0 : perLevelTransmittance[refLevel];
 
   return {
@@ -1490,8 +1546,22 @@ function evaluateLayer(
         ringKm: r.ringKm - ring.ringKm,
       }));
       const rebasedTerrain = terrainM.slice(ringIdx);
+      // **远端外推要用"覆盖率外推"而不是"截断光路"来抑制**（P1 修复）。
+      //
+      // 问题：每个环的 `samples` 是模式在该点的**单点时间序列**，不是空间场。
+      // 重定基后最远环（450km）只剩它自己一个采样点，若仍向外积分 450km，
+      // 等于把单点云量沿光线克隆外推到 900km。
+      //
+      // 但**不能靠收缩 maxRangeKm 来解决**（实测踩过这个坑）：
+      // 光路本该穿越 450km 上的所有云层，截短会把合法遮挡一起丢掉 ——
+      // 整层阴天的 700hPa 从 faint 被抬成 minor，比原 bug 更糟。
+      //
+      // 正确做法：保留完整积分范围，让`coverAtObserverDistance` 在
+      // 超出最后一个采样环后按**线性衰减**返回覆盖率（见该函数），
+      // 单点之外自然没有云，不再被克隆。
       ray = rayMarchingTransmittance(ring.heightM[levelKey], sunAltitudeDeg, rebasedRings, rebasedTerrain, {
         cotFactor,
+        refLevel: levelKey,
       });
       rayCache?.set(cacheKey, ray);
     }
@@ -1510,10 +1580,17 @@ function evaluateLayer(
 
     // 视线是否被地平线切断（双地平线判据）
     const geometricVisible = ring.visible[levelKey];
-    let visibleFactor: number;
-    if (geometricVisible) visibleFactor = 1;
-    else if (observerHeightM > ring.heightM[levelKey]) visibleFactor = 1; // 站在云层之上，必见
-    else visibleFactor = 0.05; // 在地平线以下：几乎不可见，仅留极弱余量
+    // 不可见就只是不可见 —— **绝不能**因为"观测者比云高"就强制置 1。
+    //
+    // 上一版有 `else if (observerHeightM > ring.heightM[levelKey]) visibleFactor = 1`
+    // （注释写着"站在云层之上，必见"），等价于假设地球是平的：
+    // 2000m 观测者看 450km 外 1500m 的云，双地平线视距上限只有 322km，
+    // 中间隆起的地球弧面高 3.4km，实际根本看不见。而
+    // `isVisibleFromObserver` 已经把观测者高度算进视距了，那个分支纯属多余。
+    //
+    // 唯一允许覆盖的例外是 cloudSea（见下）：真云海是被观测者"俯视"的实体，
+    // 由引擎单独判定 AGL 与低云量，不是凭高度差猜出来的。
+    let visibleFactor = geometricVisible ? 1 : 0.05;
 
     let cover = clamp(ring.cover[levelKey], 0, 1);
     let w: number = RING_PROXIMITY[i] ?? 0.3;
@@ -1933,7 +2010,15 @@ function frameGuardsOf(
 ): FrameGuards {
   const lowTopM = Math.max(profile.local.heightM['925'], profile.local.heightM['850']);
   const lowCoverLocal = Math.max(profile.local.cover['925'], profile.local.cover['850']);
-  const cloudSeaActive = observerMslM > lowTopM + 120 && lowCoverLocal > 0.4;
+  // **云海反转要求观测者确实**在低云之上，且**是抬升上去的**（AGL > 0）。
+  //
+  // 高原地面站的兜底：地下等压面已在 parseVerticalCloudProfile 里清零，
+  // 但 700hPa 在拉萨（3650m）略高于地面、850/925 在地下 —— 清零后
+  // lowCoverLocal 自然为 0，不会误触发。这里再加一道 AGL 门槛：
+  // 站在地面（AGL=0）不可能"俯视云海"，那只是站在山上看更远的地形。
+  const observerAglM = Math.max(observerMslM - (profile.local.groundMslM ?? 0), 0);
+  const cloudSeaActive =
+    observerAglM > 50 && observerMslM > lowTopM + 120 && lowCoverLocal > 0.4;
 
   const cloudBase = profile.cloudBaseM;
   const belowBase = cloudBase === null || observerMslM < cloudBase;
@@ -2080,14 +2165,14 @@ function vividnessOf(
   //   ② 只有一个全局乘子，不做分档修正 —— 一旦分档修正，就是在往物理里掺拟合；
   //   ③ 标定锚点写进 `tests/calibration.test.ts`，改动必须同步更新测试。
   //
-  // 定标锚点（2026-11-15 由 `scratch/anchor-probe.ts` 实测复现，
-  // 10 个校准场景 + `scratch/ceiling-probe.ts` 168 组网格搜索）：
-  //   · 洁净天空 · 45% 黄金层        → 0.894（大烧）
-  //   · 黄金层 + 满铺卷云 · 双层大烧  → 0.917（大烧）
-  //   · 水晶天 · 低 AOD 高能见度      → 0.950（大烧）
-  //   · 卷云+高积云双层 · 大烧典型    → 0.870（大烧）
-  //   · 纯净卷云满铺 · 紫霞型        → 0.526（中烧）
-  //   · 网格搜索绝对上限              → 1.094（大烧上沿）
+  // 定标锚点（2026-11-18 第五轮审查修复后重测，
+  // 由 `scratch/anchor-probe.ts` + `scratch/ceiling-probe.ts` 复现）：
+  //   · 水晶天 · 低 AOD 高能见度      → 0.958（大烧）
+  //   · 黄金层 + 满铺卷云 · 双层大烧  → 0.925（大烧）
+  //   · 洁净天空 · 45% 黄金层        → 0.901（大烧）
+  //   · 卷云+高积云双层 · 大烧典型    → 0.878（大烧）
+  //   · 纯净卷云满铺 · 紫霞型        → 0.530（中烧）
+  //   · 网格搜索绝对上限              → 1.101（大烧上沿）
   //   · 低云满铺 / 整层阴天          → 0.010 / 0.063（无烧 ~ 微烧）
   //
   // 改注释里的锚点前先跑那两个脚本 —— 手写的数字会和物理一起过期。
@@ -2259,26 +2344,56 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
   // 「这一天头顶的云整体偏厚还是偏薄」是天气尺度的量，一个黄昏内基本不变。
   // 但它只能在太阳够高时反演（SW/TOA 比值在低角下不可用，实测差 7 倍）。
   //
-  // 所以策略是：在**日落前的参考时刻**（事件前 90 分钟，此时 α 通常 10–20°）
-  // 反演一次，把结果作为该模型整条时间轴的乘子。
-  //   · 若参考时刻 α 仍 < 15°（高纬冬季），退回中性 1.0 并放弃 COT
+  // 策略：在**太阳足够高的参考时刻**反演一次，把结果作为该模型整条时间轴的乘子。
   //   · 绝不逐帧反演 —— 那会让临界帧拿到错 7 倍的乘子
   //   · **必须逐模型**（审查 P1）：各模式的辐射量与云量各自独立，
   //     拿主源的标定值去缩放对照模型的消光，会系统性错配。
+  //
+  // **方向必须按 mode 取**（P0 修复）：晚霞往回（日落前）、朝霞往前（日出后）。
+  // 上一版无条件写 `eventMs - 90min`，于是朝霞永远落在**天文黑夜**里
+  // （实测上海 −11.8°、哈尔滨 −15.4°），`refAlt < 15` 恒成立 ⇒
+  // 所有朝霞的 COT 反演 100% 失效。
+  //
+  // **门槛必须放宽到 10°**（同一处 P0）：硬编码 15° + 「−90min」在中纬秋冬
+  // 大面积失效 —— 实测 11 月 18 日北京日落前 90min 只有 13.19°、
+  // 哈尔滨 3.73°。改为在 [60,180] 分钟窗内挑太阳最高的可行时刻，
+  // 达到 18°（高信噪比）即提前锁定，避免把参考时刻推得离事件太远
+  // （云场已不是同一片）。门槛取 `COT_MIN_SUN_ALT_DEG`（=10°）。
+  //
+  // 辐射相位：Open-Meteo 的 `shortwave_radiation` 是**前一小时的平均值**，
+  // 与瞬时太阳高度角之间有约 30min 相位差，故反演时取窗口中点的高度角。
+  const cotRef = (() => {
+    // 晚霞向过去找、朝霞向未来找
+    const sign = input.mode === 'sunrise' ? 1 : -1;
+    let bestMs = eventMs + sign * 90 * 60000;
+    let bestAlt = -90;
+    for (const offMin of [60, 90, 120, 150, 180]) {
+      const ms = eventMs + sign * offMin * 60000;
+      const alt = sunPosition(ms, point.lat, point.lon).altitude;
+      if (alt > bestAlt) {
+        bestAlt = alt;
+        bestMs = ms;
+      }
+      // 已到高信噪比仰角：不必再往远处退，越近越接近同一片云场
+      if (alt >= 18) break;
+    }
+    // 小时平均辐射 → 取窗口中点验证；仍不够高则本场放弃 COT
+    const midAlt = sunPosition(bestMs - 30 * 60000, point.lat, point.lon).altitude;
+    return { ms: bestMs, alt: Math.max(bestAlt, midAlt), midMs: bestMs - 30 * 60000 };
+  })();
+
   const cotFactorFor = (() => {
-    const refMs = eventMs - 90 * 60000;
-    const refAlt = sunPosition(refMs, point.lat, point.lon).altitude;
     const cache = new Map<ModelId, number>();
     return (model: ModelId): number => {
-      if (refAlt < 15) return 1;
+      if (cotRef.alt < COT_MIN_SUN_ALT_DEG) return 1;
       const hit = cache.get(model);
       if (hit !== undefined) return hit;
-      const refProfile = parseVerticalCloudProfile(bundle, model, refMs, observerMslM);
-      const refAer = sampleAerosol(bundle, model, refMs);
+      const refProfile = parseVerticalCloudProfile(bundle, model, cotRef.ms, observerMslM);
+      const refAer = sampleAerosol(bundle, model, cotRef.ms);
       const tauObs = inferCloudOpticalDepthFromRadiation(
         refProfile.local.shortwaveRadiation,
         refProfile.local.terrestrialRadiation,
-        refAlt,
+        cotRef.alt,
         refAer.aod,
       );
       let factor = 1;
@@ -2396,9 +2511,20 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
         goldenAux += l.quality * l.lit * l.transmittance * l.visible;
       }
     }
-    let highUncovered = 1;
-    for (const s of highScreens) highUncovered *= 1 - s;
-    const highUnion = 1 - highUncovered;
+    // **必须与主评分同源的 exponential-random 重叠**（P1 修复）。
+    //
+    // 上一版写 `highUncovered *= 1 - s`（独立并集），等价于假设四层高云
+    // 处在互不相关的空间位置。实际上 400/300/250/200hPa 覆盖的是
+    // **同一片天空的不同高度**，叠加面积不是简单互补 —— 独立并集会系统性
+    // 高估高云发光面积，让二烧概率虚高。
+    const highUnion = combinedCloudCover(
+      snap.layers
+        .filter((l) => l.role === 'high')
+        .map((l) => ({
+          cover01: clamp(l.quality * l.lit * l.transmittance * l.visible, 0, 1),
+          heightKm: l.heightM / 1000,
+        })),
+    );
     const highSum = ROLE_WEIGHT.high * highUnion + ROLE_WEIGHT.golden * 0.12 * goldenAux;
 
     // 与主分数同源的锁死/否决（上一版遗漏了，导致阴天也可能报二烧）
@@ -2425,6 +2551,10 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
     if (snap.guards.fogLock) v *= 0.5;
     if (snap.guards.hazeLock) v *= 0.72;
     if (snap.guards.overcastLock) v *= 0.26;
+    // 这两条上一版漏了（P1 修复）：主评分有、二烧没有，于是强雷暴/厚云幕下
+    // 依然会报出可观的二烧概率，与页面顶部的「鲜艳度被砍 82%」自相矛盾。
+    if (snap.guards.thickDeckLock) v *= 0.58;
+    if (snap.guards.deepConvection) v *= 0.18;
     v *= snap.terrainBlockedKm !== null ? 0.22 : 1;
     v *= snap.wall.factor;
 
@@ -2533,6 +2663,32 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
       title: '整层阴天封顶',
       detail: '700 / 600 / 500 / 400hPa 云量均超过 80%，云幕自身沉入阴影，没有受光面。',
       penalty: 0.26,
+    };
+  } else if (peakGuards.deepConvection) {
+    // P1 修复：主评分里 deepConvection 会把鲜艳度砍到 ×0.18，
+    // 但 veto 链表从未包含它 —— 于是强雷暴天页面顶部显示
+    // 「✓ 光路通畅 · 光路无否决」，分数却几乎归零，自相矛盾。
+    veto = {
+      active: true,
+      kind: 'deep-convection',
+      title: '强对流积雨云黑幕',
+      detail: `CAPE ${Math.round(
+        peakSnap.profile.local.cape,
+      )} J/kg 且伴随 ${peakSnap.profile.local.precipitation.toFixed(
+        1,
+      )}mm/h 降水，云体垂直深厚。积雨云光学厚度是层云的十倍以上，整条光路被封死 —— 这种天只能拍闪电。`,
+      penalty: 0.18,
+    };
+  } else if (peakGuards.thickDeckLock) {
+    // 同上：thickDeckLock（×0.58）也漏在 veto 之外。
+    // 它排在 overcast 之后、云墙之前：overcast 是四层全满，这里只是
+    // 600/500/400 三层满铺，程度略轻。
+    veto = {
+      active: true,
+      kind: 'thick-deck',
+      title: '中高层厚云幕遮蔽',
+      detail: '600 / 500 / 400hPa 云量均超过 88%，云幕自身沉入阴影，受光面被削薄。',
+      penalty: 0.58,
     };
   } else if (peakSnap.wall.closed) {
     veto = {

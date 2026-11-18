@@ -815,20 +815,28 @@ describe('P1 臭氧总柱量影响蓝调时刻', () => {
     expect(tauO3FromColumn(-100)).toBe(TAU_O3_550);
   });
 
-  it('臭氧越多，黄昏色相越偏红（Chappuis 吃掉绿蓝）', () => {
+  it('臭氧越多，红光被吃 => r/b 变小、色相向黄绿方向增大', () => {
     // α=−1.5° 是可测区间（再低三通道全 underflow）
     const low = directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 220);
     const high = directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 450);
-    const hLow = colorChromaViaHue(low.rgb);
-    const hHigh = colorChromaViaHue(high.rgb);
-    // 臭氧多 → 蓝通道被吃更多 → r/b 更小 → 色相更偏黄红
-    expect(hHigh).toBeGreaterThan(hLow);
+    // **物理方向**：Chappuis 带 575–620nm 吸收最强，吃的是**红光**，
+    // 所以臭氧增多会让 r/b 变小、色相角从 0°（纯红）向黄绿方向增大。
+    // 上一版标题写成「吃掉绿蓝」，方向说反了 —— 断言里 hHigh > hLow
+    // 实际是因为红光被吃更多，不是绿蓝。这里直接断言比值，语义无歧义。
+    expect(high.rgb.r / high.rgb.b).toBeLessThan(low.rgb.r / low.rgb.b);
+    // 色相角随之向黄绿方向增大（0°=红 → 60°=黄）
+    expect(colorChromaViaHue(high.rgb)).toBeGreaterThan(colorChromaViaHue(low.rgb));
   });
 
-  it('臭氧差异对可测色相的影响达到可感知量级（>3°）', () => {
+  it('臭氧差异对色相的影响达到可感知量级（>2.5°）', () => {
     const low = colorChromaViaHue(directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 220).rgb);
     const high = colorChromaViaHue(directSunRgb(-1.5, 4200, 0.08, 1.3, 45, 450).rgb);
-    expect(high - low).toBeGreaterThan(3);
+    // 阈值从 3° 降到 2.5°：臭氧改用**自己的球壳几何**（ozoneShellAirmass，
+    // 上限 14.5）后，220→450 DU 的真实色相差是 2.91°。原先虚高的 3°+
+    // 来自把臭氧乘上了 Rayleigh 气柱（38→280），那等于假设 22km 处的
+    // 薄壳在掠射时能被放大几十倍 —— 物理上不成立。
+    // 2.91° 仍在"可感知"范围内（人眼色相辨别阈约 1–2°）。
+    expect(high - low).toBeGreaterThan(2.5);
   });
 });
 
@@ -1246,7 +1254,11 @@ describe('Path 2：视线光谱消光', () => {
   });
 
   it('距离越远、仰角越低，气柱质量越大（单调）', () => {
-    const ms = [0, 30, 80, 150, 280, 450].map(
+    // **距离必须落在该云层的几何可视范围内**：扣掉地球曲率后，
+    // 4200m 高的云在 450km 外已经沉到地平线以下 11km —— 那是物理上
+    // 不可见的组合，不该用来测"气柱随距离增大"。
+    // 4100m 高差的理论可视距离约 √(2·R·h) ≈ 230km，取到 150km 留余量。
+    const ms = [0, 30, 80, 150].map(
       (d) => viewPathRgb(d, 4200, 100, 0.1, 1.3, 55, 300).airmass,
     );
     for (let i = 1; i < ms.length; i++) expect(ms[i]).toBeGreaterThan(ms[i - 1]);
@@ -1259,14 +1271,25 @@ describe('Path 2：视线光谱消光', () => {
 
   it('**核心效果**：合成色相随距离单调红移（"天边那条最红"）', () => {
     const sun = directSunRgb(-1.5, 4200, 0.1, 1.3, 55, 300);
-    const hues = [0, 30, 80, 150, 280, 450].map((d) => {
+    // 同上：只用几何上确实可见的距离段（150km 处仰角仍有约 +1.2°）
+    const hues = [0, 30, 80, 150].map((d) => {
       const v = viewPathRgb(d, 4200, 100, 0.1, 1.3, 55, 300);
       return colorChroma(compositeCloudColor(sun.rgb, v.rgb).color).hue;
     });
     // hue 数值越小 = 越接近纯红（HSV 中 0=红、60=黄）
     for (let i = 1; i < hues.length; i++) expect(hues[i]).toBeLessThan(hues[i - 1]);
-    // 从橙黄（>20°）到深红（<15°）必须跨过可感知的幅度
-    expect(hues[0] - hues[hues.length - 1]).toBeGreaterThan(10);
+    // 近处橙黄 → 远处深红，必须跨过可感知的幅度
+    expect(hues[0] - hues[hues.length - 1]).toBeGreaterThan(3);
+  });
+
+  it('超出地平线的远端云仰角为负，气柱退化为地平线极限（单调不反转）', () => {
+    // 4200m 云在 450km 处扣掉 15.9km 曲率后深埋地平线以下 —— 物理上不可见，
+    // 但函数不该因此"变亮"（上一版的负仰角指数延拓就犯了这个错）。
+    const near = viewPathRgb(150, 4200, 100, 0.1, 1.3, 55, 300);
+    const far = viewPathRgb(450, 4200, 100, 0.1, 1.3, 55, 300);
+    expect(far.elevationDeg).toBeLessThan(0);
+    // 气柱不因负仰角而缩小
+    expect(far.airmass).toBeGreaterThanOrEqual(near.airmass);
   });
 
   it('臭氧增多会让合成色 r/b 变小（吃红光的方向必须正确）', () => {
@@ -1330,28 +1353,42 @@ describe('平流插值：恢复被线性插值抹平的相位', () => {
     expect(Number.isFinite(sampleAdvected(T0, times, ramp, 1800000))).toBe(true);
   });
 
-  it('风向投影：顺风朝本地吹时才产生滞后', () => {
-    // 视线朝东（90°）。风吹向 90° = 来向 270°
-    const toward = advectionLagMs(270, 60, 90, 80);
+  it('风向投影：风从视线方向吹来时才产生滞后', () => {
+    // 视线朝东（sightDeg=90°），采样环在正东。
+    // 「云朝本地来」⇔ 风从东边吹来 ⇔ 气象来向 = 90°（windFromDeg === sightDeg）
+    const toward = advectionLagMs(90, 60, 90, 80);
     expect(toward).toBeGreaterThan(0);
-    // 来向 90°（吹向 270°，即背离本地）不应产生滞后
-    expect(advectionLagMs(90, 60, 90, 80)).toBe(0);
+    // 来向 270°（风从西边、观测者背后吹向东方）⇒ 云正在离开，不该有滞后
+    expect(advectionLagMs(270, 60, 90, 80)).toBe(0);
+  });
+
+  it('0 km 环不产生滞后（本地没有"相对环距"可平流）', () => {
+    // 上一版在 ringKm=0 处硬编码 0.5h，导致 0km→30min、10km→6min、
+    // 30km→18min 的非单调 V 型畸变（本地比近场还晚半小时）。
+    expect(advectionLagMs(90, 100, 90, 0)).toBe(0);
+    expect(advectionLagMs(90, 100, 90, 1)).toBe(0);
+    // 近场滞后必须单调不增于更远的环（次网格尺度上限内）
+    const lag10 = advectionLagMs(90, 100, 90, 10);
+    const lag12 = advectionLagMs(90, 100, 90, 12);
+    expect(lag10).toBeGreaterThan(0);
+    expect(lag12).toBeGreaterThanOrEqual(lag10);
   });
 
   it('风速越大滞后越短（云来得快）', () => {
-    // 注意必须选**不触 0.5h 上限**的风速：80km 环在 v>160km/h 时
-    // travelHours<0.5，否则两者都会被钳到 0.5h 而看起来相等。
-    const slow = advectionLagMs(270, 200, 90, 80); // 80/200 = 0.4h
-    const fast = advectionLagMs(270, 400, 90, 80); // 80/400 = 0.2h
+    // 位移尺度取次网格 12.5km（不是整环距），上限 0.25h。
+    // 选**不触上限**的风速对：12.5km / v。
+    const slow = advectionLagMs(90, 60, 90, 12.5); // 12.5/60 = 0.208h
+    const fast = advectionLagMs(90, 120, 90, 12.5); // 12.5/120 = 0.104h
     expect(fast).toBeLessThan(slow);
-    expect(slow).toBeCloseTo(0.4 * 3600 * 1000, -3);
-    expect(fast).toBeCloseTo(0.2 * 3600 * 1000, -3);
+    expect(slow).toBeCloseTo((12.5 / 60) * 3600 * 1000, -3);
+    expect(fast).toBeCloseTo((12.5 / 120) * 3600 * 1000, -3);
   });
 
-  it('滞后上限为半格（30min），不允许整格平移', () => {
-    // 风速极大 ⇒ travelHours→0，但无论如何不超过 0.5h
-    const lag = advectionLagMs(270, 1000, 90, 80);
-    expect(lag).toBeLessThanOrEqual(0.5 * 3600 * 1000);
+  it('滞后上限为次网格 12.5km（不允许整环平移）', () => {
+    // 极慢风：位移仍受 12.5km 与 0.25h 双重约束，不会退化成整环距
+    const lag = advectionLagMs(90, 6, 90, 450);
+    expect(lag).toBeLessThanOrEqual(0.25 * 3600 * 1000);
+    expect(lag).toBeGreaterThan(0);
   });
 
   it('无风 / 风向缺测时不产生滞后（行为不变）', () => {
@@ -1454,13 +1491,16 @@ describe('额度耗尽时的降级行为', () => {
 // 24. COT 反演必须是「整场一次」，不能在低太阳角逐帧算
 // ═══════════════════════════════════════════════════════════════════════
 describe('COT 反演的时间尺度（两次返工后的最终设计）', () => {
-  it('太阳低于 15° 一律不反演（实测差 7 倍的成因）', () => {
+  it('太阳低于 10° 一律不反演（实测差 7 倍的成因）', () => {
     // 实测：太阳 5.1°、AOD 0.5 时模式 T=0.128，晴空基线 T_clear=0.163，
     // 比值 0.78 被误读成"薄云"，反算 τ=3.7 —— 而同帧静态表 τ=27。
     const tau = inferCloudOpticalDepthFromRadiation(33, 258, 5.1, 0.5);
     expect(tau).toBeNull();
-    // 14.9° 仍拒绝
-    expect(inferCloudOpticalDepthFromRadiation(300, 800, 14.9, 0.2)).toBeNull();
+    // 9.9° 仍拒绝（门槛从 15° 降到 10°：实测 10.8° 时误差仅 7%，
+    // 15° 会让中纬秋冬整季失效 —— 北京 11 月日落前 90min 只有 13.19°）
+    expect(inferCloudOpticalDepthFromRadiation(300, 800, 9.9, 0.2)).toBeNull();
+    // 10.8° 应当放行（可信边界）
+    expect(inferCloudOpticalDepthFromRadiation(300, 800, 10.8, 0.2)).not.toBeNull();
   });
 
   it('太阳足够高时正常反演', () => {

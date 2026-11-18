@@ -74,7 +74,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
           <div>
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
               鲜艳度指数
-              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的实测可达上限约 1.09）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
+              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的实测可达上限约 1.10）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
             </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span

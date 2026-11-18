@@ -81,7 +81,12 @@ body {
       0 22px 54px -30px rgba(0, 0, 0, 0.92);
     border-radius: 22px;
     position: relative;
-    overflow: hidden;
+    /* **不要 overflow: hidden**（P1 修复）。
+       卡片头部的 InfoTip 气泡绝对定位向上/向右弹出，而卡片内边距只有
+       pt-3.5 / px-4 —— 一旦裁切，气泡会被切掉顶部与右半边，
+       8 张卡片上的说明全部无法阅读。圆角由元素自身 border-radius 与
+       .glass::before 的 `border-radius: inherit` 负责，不依赖 overflow。
+       需要裁内容的卡片请自己在内层元素上加 overflow。 */
   }
 
   .glass::before {

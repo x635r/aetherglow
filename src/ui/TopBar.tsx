@@ -26,17 +26,24 @@ export function TopBar() {
       setResults([]);
       return;
     }
+    // **竞态守卫**（P2 修复）：快速输入时，先发的慢请求可能后到，
+    // 把新搜索词的结果覆盖成旧词的。cancelled 标记丢弃过期响应。
+    let cancelled = false;
     const t = setTimeout(async () => {
       setSearching(true);
       try {
-        setResults(await searchPlaces(q));
+        const found = await searchPlaces(q);
+        if (!cancelled) setResults(found);
       } catch {
-        setResults([]);
+        if (!cancelled) setResults([]);
       } finally {
-        setSearching(false);
+        if (!cancelled) setSearching(false);
       }
     }, 420);
-    return () => clearTimeout(t);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [q]);
 
   const pick = (p: Place) => {
@@ -155,7 +162,14 @@ export function TopBar() {
                   </div>
                 </div>
 
-                <CoordPicker onApply={(lat, lon) => setPoint({ lat, lon }, `${lat.toFixed(3)}, ${lon.toFixed(3)}`)} />
+                {/* 定位后要关闭下拉（P2 修复）：上一版漏了 setSearchOpen(false)，
+                    面板会一直悬停遮挡主卡片 */}
+                <CoordPicker
+                  onApply={(lat, lon) => {
+                    setPoint({ lat, lon }, `${lat.toFixed(3)}, ${lon.toFixed(3)}`);
+                    setSearchOpen(false);
+                  }}
+                />
               </div>
             )}
           </div>
@@ -194,8 +208,12 @@ export function TopBar() {
               />
             </div>
 
-            {/* 数据源 */}
-            <div className="hidden items-center gap-1 md:flex">
+            {/* 数据源。
+                **移动端也要能用**（P2 修复）：上一版 `hidden md:flex`
+                把三个模型开关和强制刷新在 <768px 完全隐藏，
+                手机/平板竖屏用户既不能切模型也不能手动刷新。
+                现在只是换行，不隐藏。 */}
+            <div className="flex flex-wrap items-center gap-1">
               {(['ecmwf', 'gfs', 'icon'] as ModelId[]).map((m) => {
                 const on = query.models.includes(m);
                 return (
@@ -244,7 +262,7 @@ export function TopBar() {
             <>
               <span className="hidden sm:inline">·</span>
               <span className="hidden sm:inline">
-                光路环 {bundle.terrain.length} 点 · 3 源
+                光路环 {bundle.terrain.length} 点 · {query.models.length} 源
               </span>
               <span className="hidden md:inline">·</span>
               <span className="hidden md:inline">时区 {tzName}</span>

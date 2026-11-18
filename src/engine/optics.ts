@@ -790,6 +790,34 @@ export function tauO3FromColumn(totalColumnDu: number): number {
   return TAU_O3_550 * (totalColumnDu / OZONE_REFERENCE_DU);
 }
 
+/** 平流层臭氧主层的中心高度与半宽 (km) —— Chappuis 带集中在 20–25km */
+export const OZONE_LAYER_CENTER_KM = 22;
+export const OZONE_LAYER_HALF_KM = 5;
+
+/**
+ * 平流层臭氧球壳的**几何斜程放大因子**（相对垂直穿越）。
+ *
+ * 为什么不能用 Rayleigh 的气柱因子（P1 修复的关键）：
+ * Rayleigh 消光的质量重心在 ~8km 标高柱内，掠射时几何放大可达 38；
+ * 而臭氧 90% 集中在 20–25km 的薄壳里。掠射光线即使切点贴地，
+ * 穿过这层壳的斜程也只被放大约 √(1/(1−sin²θ)) 的量级，上限约 14。
+ *
+ * 上一版把臭氧乘上了 `rayleigh`（38→280），在太阳低于 −1.5° 时
+ * 把臭氧吸收高估 3–20 倍 —— 表现为深暮光过紫、蓝色通道被吃得过狠。
+ *
+ * @param tangentHeightM 光束切点高度（MSL）
+ * @returns 斜程放大倍数，钳在 [1, 14]
+ */
+export function ozoneShellAirmass(tangentHeightM: number): number {
+  const hTkm = Math.max(tangentHeightM, 0) / 1000;
+  // 切点已在壳层之上：垂直光路（1×）
+  if (hTkm >= OZONE_LAYER_CENTER_KM) return 1;
+  // 球壳几何：sinθ = (R + h_t) / (R + z_O3)
+  const sinZenith = (EARTH_RADIUS_KM + Math.min(hTkm, OZONE_LAYER_CENTER_KM)) /
+    (EARTH_RADIUS_KM + OZONE_LAYER_CENTER_KM);
+  return clamp(1 / Math.sqrt(Math.max(1 - sinZenith * sinZenith, 0.005)), 1, 14);
+}
+
 /**
  * 直射太阳光到达目标云层后的 RGB 透过率（0~1）。
  * 三通道分开积分 → 色相与饱和度是算出来的，不是配出来的。
@@ -806,19 +834,22 @@ export function directSunRgb(
   const { rayleigh, aerosol, rangeKm } = directBeamAirmass(cloudMslM, alphaDeg);
   const hygro = 1 + Math.pow(clamp((rh - 55) / 45, 0, 1), 2) * 1.15;
   const tauO3Vert = tauO3FromColumn(ozoneColumnDu);
+  // 臭氧走**自己的**球壳几何，不跟 Rayleigh 共用气柱（P1 修复）。
+  const tangentM = beamTangentHeightM(cloudMslM, alphaDeg);
+  const o3Airmass = ozoneShellAirmass(tangentM);
 
   const rgb: RgbColor = { r: 0, g: 0, b: 0 };
   for (const ch of ['r', 'g', 'b'] as const) {
     const lam = LAMBDA[ch] / 550;
     const tauRay = TAU_R550 * Math.pow(lam, -4) * rayleigh;
     const tauAer = aod * hygro * Math.pow(lam, -angstrom) * aerosol;
-    // 臭氧 Chappuis：与 Rayleigh 同样沿切点气柱放大。
+    // 臭氧 Chappuis：与 Rayleigh 分开计算。
     //
     // **物理方向（别写反）**：Chappuis 带在 575–620nm（红黄区）吸收最强，
     // 在 465nm 几乎为零。所以臭氧增多吃掉的正是**红光**，使蓝紫相对占比升高、
     // r/b 变小。这与 Rayleigh 的"吃蓝"方向相反，所以两者在暮光里是竞争关系 ——
     // 也正是真实暮光在"金橙 ↔ 品红/蓝紫"两种色相间摆动的物理原因。
-    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * rayleigh;
+    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * o3Airmass;
     rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
   }
   return { rgb, rayleighAirmass: rayleigh, aerosolAirmass: aerosol, rangeKm };
@@ -891,17 +922,45 @@ export function viewPathRgb(
   rh = 55,
   ozoneColumnDu = OZONE_REFERENCE_DU,
 ): { rgb: RgbColor; elevationDeg: number; airmass: number } {
-  // 视线仰角：由高度差与水平距离直接给出（小角度时即为几何仰角）
-  const dhKm = Math.max(cloudMslM - observerM, 0) / 1000;
+  // 视线仰角：**必须扣掉地球曲率下沉**，否则 280km 外会少算 5.3km 落差。
+  //
+  // 并且**保留负仰角**：上一版写 `Math.max(cloudMslM - observerM, 0)`，
+  // 使 elevationDeg 恒 ≥ 0，负仰角分支成为 100% 死代码 —— 而负仰角正是
+  // 高山俯视云海、航拍看脚下云层的真实几何。
+  const dropM = curvatureDropM(distKm);
+  const dhKm = (cloudMslM - dropM - observerM) / 1000;
   const elevationDeg = (Math.atan2(dhKm, Math.max(distKm, 1e-3)) * 180) / Math.PI;
 
-  // 视线气柱质量：Kasten–Young 在仰角 ≥ 0 时成立；
-  // 仰角为负（云在观测者地平线以下，只有高山/航拍才能看到）时
-  // 用与 `beamAirmass` 同款的指数延拓，保证连续。
-  const airmass =
-    elevationDeg >= 0
-      ? kastenYoungAirmass(elevationDeg)
-      : 38 * Math.exp(elevationDeg / 3); // 每 3° 衰减一个 e 倍，近似切点几何
+  // 视线气柱：Kasten–Young 在仰角 ≥ 0 成立。
+  //
+  // **负仰角绝不能"衰减消光"**：仰角越负说明视线越往下扎进低层大气，
+  // 气柱只会更长，不会更短。上一版写 `38 * exp(elev/3)` 让负仰角越深
+  // 消光越小（越亮），方向反了，表现为"天边最远的云反而不红了"。
+  // 这里把负仰角按地平线处理（气柱取 Kasten–Young 在 0° 的极限值 38），
+  // 既保守又单调。真正的下方遮挡由 `isVisibleFromObserver` 的双地平线
+  // 判据负责，不在这里用消光去近似。
+  const slantFactor = kastenYoungAirmass(clamp(elevationDeg, 0, 90));
+
+  // **只积分观测者与云层之间的真实子气柱**（P1 修复）。
+  //
+  // 上一版直接用整层斜程：头顶 1km 处的近云也会吃掉整条大气柱与
+  // 22km 处的平流层臭氧，表现出"近云过暗、颜色过脏"。
+  // 用两条指数柱的差值取子柱份额，并给两端设下限避免同高时除零。
+  const z1 = Math.max(observerM, 0) / 1000;
+  const z2 = Math.max(cloudMslM, 0) / 1000;
+  const raySubCol = Math.max(
+    Math.abs(Math.exp(-z1 / H_RAYLEIGH) - Math.exp(-z2 / H_RAYLEIGH)),
+    0.05,
+  );
+  const aerSubCol = Math.max(
+    Math.abs(Math.exp(-z1 / H_AEROSOL) - Math.exp(-z2 / H_AEROSOL)),
+    0.08,
+  );
+  // 对流层内的云（<12km）到地面的视线**不穿过** 22km 的臭氧主层，
+  // 只含约 10% 的对流层本底臭氧。把它按整层算会高估臭氧 3–20 倍。
+  const o3SubCol = 0.1 * raySubCol;
+
+  const airmass = slantFactor * raySubCol;
 
   const hygro = 1 + Math.pow(clamp((rh - 55) / 45, 0, 1), 2) * 1.15;
   const tauO3Vert = tauO3FromColumn(ozoneColumnDu);
@@ -909,9 +968,9 @@ export function viewPathRgb(
   const rgb: RgbColor = { r: 0, g: 0, b: 0 };
   for (const ch of ['r', 'g', 'b'] as const) {
     const lam = LAMBDA[ch] / 550;
-    const tauRay = TAU_R550 * Math.pow(lam, -4) * airmass;
-    const tauAer = aod * hygro * Math.pow(lam, -angstrom) * airmass;
-    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * airmass;
+    const tauRay = TAU_R550 * Math.pow(lam, -4) * slantFactor * raySubCol;
+    const tauAer = aod * hygro * Math.pow(lam, -angstrom) * slantFactor * aerSubCol;
+    const tauO3 = tauO3Vert * ozoneExtinctionRel(LAMBDA[ch]) * slantFactor * o3SubCol;
     rgb[ch] = Math.exp(-(tauRay + tauAer + tauO3));
   }
   return { rgb, elevationDeg, airmass };
@@ -1221,11 +1280,16 @@ export function inferCloudOpticalDepthFromRadiation(
 /**
  * COT 反演要求的最低太阳高度角。
  *
- * 15° 的依据：实测 5.1° 时晴空基线与模式比值偏差达 27%（0.163 vs 0.128），
- * 反算出的 τ 与静态表差 7 倍；而 10.8° 时（τ_obs=28.7 vs τ_static=26.8）
- * 两者相差仅 7%，反演可信。15° 在这两者之间，留了余量。
+ * 依据（测得的，不是拍的）：实测 5.1° 时晴空基线与模式比值偏差达 27%
+ * （0.163 vs 0.128），反算出的 τ 与静态表差 7 倍；而 **10.8° 时
+ * （τ_obs=28.7 vs τ_static=26.8）两者相差仅 7%**，反演可信。
+ *
+ * 取 10°（贴着可信边界的下沿）而不是 15°：15° 会把中纬秋冬的整个晚霞
+ * 判为不可反演 —— 实测 11 月 18 日北京日落前 90min 只有 13.19°、
+ * 哈尔滨 3.73°，于是 COT 在这些地区整季失效（P0 修复）。
+ * 调用方现在会主动搜索太阳最高的参考时刻，10° 只是最后一道保险。
  */
-export const COT_MIN_SUN_ALT_DEG = 15;
+export const COT_MIN_SUN_ALT_DEG = 10;
 
 export function inferCloudOpticalDepth(
   shortwaveW: number | undefined,
