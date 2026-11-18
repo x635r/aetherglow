@@ -72,7 +72,14 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
       right={<InfoTip text="极坐标雷达：圆心是观测者，向外 450km 是真实大圆距离。扇叶颜色 = 该环「受光云幕得分」（云量 × 受光 × 透过率）。红 = 地形阻断。" />}
       bodyClass="!pt-0"
     >
-      <svg viewBox={`0 0 ${W} ${H}`} className="mx-auto w-full max-w-[240px]" role="img" aria-label="区域火烧云热力分布">
+      {/*
+        `max-w` + `w-full` 会让 SVG 在窄容器里等比缩小，而 `fontSize` 是
+        viewBox 单位 —— 缩小时刻度的实际字号会掉到 11px 以下
+        （实测 240px 时 0.923×12 ≈ 11.1px，再窄就不够了）。
+        viewBox 260 是绘图坐标，展示尺寸固定 240 后 scale 恒为 0.923，
+        fontSize 12 稳定渲染 ≈11.1px。
+      */}
+      <svg viewBox={`0 0 ${W} ${H}`} width={240} height={240} className="mx-auto block shrink-0" role="img" aria-label="区域火烧云热力分布">
         <defs>
           <radialGradient id="hz-glow">
             <stop offset="0" stopColor="rgba(255,214,138,0.20)" />

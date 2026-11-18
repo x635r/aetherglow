@@ -218,13 +218,25 @@ function GaugeSvg({
   const endDeg = start + sweep * Math.max(0.001, Math.min(1, value));
 
   return (
-    <svg viewBox="0 0 92 74" className="w-full max-w-[112px]" role="img" aria-label={`${label} ${display}`}>
+    // 固定像素宽度（而不是 `w-full max-w-[112px]`）。
+    //
+    // 原因：SVG 的 `fontSize` 是 viewBox 单位，实际渲染字号 =
+    // fontSize × (显示宽度 / viewBox 宽度)。上一版用 `w-full` 时，
+    // 同一段代码在 92–140px 的容器里渲染出 8–13.7px 的字号 ——
+    // 既无法守住 11px 底线，同一张卡内的标签大小还会随窗口变化。
+    // 固定 112px 后 viewBox 92 → scale 恒为 1.217：
+    // 主数值 14×1.217≈17px、副标签 9×1.217≈11.0px，两者都恰好达标。
+    <svg viewBox="0 0 92 74" width={112} height={90} className="shrink-0" role="img" aria-label={`${label} ${display}`}>
       <path d={arcPath(start, start + sweep)} fill="none" stroke="rgba(255,255,255,0.09)" strokeWidth="5.5" strokeLinecap="round" />
       <path d={arcPath(start, endDeg)} fill="none" stroke={color} strokeWidth="5.5" strokeLinecap="round" opacity="0.92" />
       <circle cx={pt(endDeg).x} cy={pt(endDeg).y} r="2.6" fill="#fff" opacity="0.95" />
       <text x={cx} y={cy + 1} textAnchor="middle" fontSize="14" fontWeight="700" fill="#eef3fb" fontFamily="JetBrains Mono, monospace">
         {display}
       </text>
+      {/*
+        scale 恒为 1.217（viewBox 92 → 固定展示 112px）：
+        fontSize 9 → 实际 11.0px，正好压在底线上。
+      */}
       <text x={cx} y={cy + 12} textAnchor="middle" fontSize="9" fill="rgba(160,180,205,0.8)" fontFamily="JetBrains Mono, monospace">
         {label} · {sub}
       </text>
