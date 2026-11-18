@@ -66,9 +66,9 @@ export function TopBar() {
             <div className="leading-none">
               <div className="font-display text-[15px] font-bold tracking-[0.06em] text-slate-50">
                 AETHERGLOW
-                <span className="ml-1.5 text-[10px] font-medium tracking-[0.22em] text-amber-300/80">穹霞</span>
+                <span className="ml-1.5 text-[11px] font-medium tracking-[0.22em] text-amber-300/80">穹霞</span>
               </div>
-              <div className="mt-1 text-[9.5px] font-medium uppercase tracking-[0.18em] text-slate-500">
+              <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500">
                 Ray-Marched Twilight Engine
               </div>
             </div>
@@ -102,7 +102,7 @@ export function TopBar() {
                 <PinIcon />
                 <span className="truncate text-[12.5px]">{query.label}</span>
               </span>
-              <span className="num ml-2 shrink-0 text-[10px] text-slate-500">
+              <span className="num ml-2 shrink-0 text-[11px] text-slate-500">
                 {query.point.lat.toFixed(2)}, {query.point.lon.toFixed(2)}
               </span>
             </button>
@@ -130,11 +130,11 @@ export function TopBar() {
                     >
                       <span className="min-w-0">
                         <span className="block truncate text-[13px] text-slate-100">{p.name}</span>
-                        <span className="block truncate text-[10.5px] text-slate-500">
+                        <span className="block truncate text-[11px] text-slate-500">
                           {[p.admin1, p.country].filter(Boolean).join(' · ')}
                         </span>
                       </span>
-                      <span className="num shrink-0 text-[10px] text-slate-500">
+                      <span className="num shrink-0 text-[11px] text-slate-500">
                         {p.latitude.toFixed(2)}, {p.longitude.toFixed(2)}
                       </span>
                     </button>
@@ -142,7 +142,7 @@ export function TopBar() {
                 </div>
 
                 <div className="mt-2.5 border-t border-white/8 pt-2.5">
-                  <div className="mb-1.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                     快捷城市
                   </div>
                   <div className="flex flex-wrap gap-1.5">
@@ -245,7 +245,7 @@ export function TopBar() {
         </div>
 
         {/* 状态条 */}
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[9.5px] text-slate-500 sm:text-[10px]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-slate-500 sm:text-[11px]">
           <span className="flex items-center gap-1.5">
             <Dot color={statusColor} pulse={status === 'loading'} />
             {status === 'loading'
@@ -287,7 +287,7 @@ function CoordPicker({ onApply }: { onApply: (lat: number, lon: number) => void 
 
   return (
     <div className="mt-2.5 border-t border-white/8 pt-2.5">
-      <div className="mb-1.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
         任意经纬度拾取
       </div>
       <div className="flex items-center gap-1.5">

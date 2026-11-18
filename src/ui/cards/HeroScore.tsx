@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { GRADE_THEME, VIVIDNESS_CEILING } from '../../engine/constants';
 import type { SunsetPredictionOutput } from '../../engine/types';
-import { localClock } from '../../engine/SunsetPhysicsEngine';
+import { localClock, compassName16 } from '../../engine/SunsetPhysicsEngine';
 import { AnimatedNumber, Bar, InfoTip } from '../primitives';
 
 const GRADE_ORDER = [
@@ -23,19 +23,24 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
   const scorePct = p.score / 100;
 
   return (
-    <div className="glass relative overflow-hidden min-h-[268px] sm:min-h-[300px]">
-      {/* 流体渐变背景 */}
-      <FluidBackdrop theme={key} accent={theme.accent} />
+    // `overflow-hidden` 只在**背景层**，内容层绝不裁剪（第四轮 NEW-04）。
+    // 上一版把它写在外层容器上，于是左上角「鲜艳度指数」的说明浮层
+    // 向左溢出 139px 时被卡片一刀切掉。浮层属于内容层，不能受装饰层约束。
+    <div className="glass relative min-h-[268px] sm:min-h-[300px]">
+      {/* 流体渐变背景（唯一需要裁剪的层） */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-[22px]">
+        <FluidBackdrop theme={key} accent={theme.accent} />
+      </div>
 
       <div className="relative z-10 flex h-full flex-col justify-between p-4 sm:p-6">
         {/* 顶部：地点 / 时间 */}
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/55">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/55">
                 {p.mode === 'sunset' ? 'SUNSET FORECAST' : 'SUNRISE FORECAST'}
               </span>
-              <span className="rounded-full border border-white/20 bg-black/25 px-2 py-0.5 text-[9.5px] font-medium tracking-wide text-white/70">
+              <span className="rounded-full border border-white/20 bg-black/25 px-2 py-0.5 text-[11px] font-medium tracking-wide text-white/70">
                 {p.primaryModel === 'ecmwf' ? 'ECMWF 主源' : p.primaryModel === 'gfs' ? 'GFS 主源' : 'ICON 主源'}
               </span>
             </div>
@@ -61,7 +66,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               completeness={p.completeness}
             />
             {p.veto.active && (
-              <span className="flex max-w-[220px] items-center gap-1.5 rounded-lg border border-rose-400/35 bg-rose-950/45 px-2 py-1 text-[10px] leading-tight text-rose-200">
+              <span className="flex max-w-[220px] items-center gap-1.5 rounded-lg border border-rose-400/35 bg-rose-950/45 px-2 py-1 text-[11px] leading-tight text-rose-200">
                 <WarnIcon />
                 <span className="truncate">{p.veto.title}</span>
               </span>
@@ -72,9 +77,9 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
         {/* 主数值 */}
         <div className="mt-5 flex flex-wrap items-end gap-x-8 gap-y-4">
           <div>
-            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55">
               鲜艳度指数
-              <InfoTip text="Vividness Index 0.00–1.60+（当前数据模型的实测可达上限约 1.10）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
+              <InfoTip align="left" text="Vividness Index 0.00–1.60+（当前数据模型的实测可达上限约 1.10）。由受光云幕质量 × 晨昏辉光 × 光谱饱和度 × 光路透过率积分得到，对齐 SunsetBot 行业分级。" />
             </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span
@@ -88,7 +93,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
 
             <div className="mt-2.5 w-[190px] sm:w-[250px]">
               <Bar value={vividPct} max={1} color={theme.accent} height={7} glow />
-              <div className="mt-1.5 flex justify-between text-[9px] text-white/40">
+              <div className="mt-1.5 flex justify-between text-[11px] text-white/40">
                 {/* 图例标注 4 个关键刻度。分档阈值是非线性的
                     （0.03/0.1/0.2/0.4/0.6/0.8/1.0/1.5/2.0），
                     所以用 justify-between 只给出"无→小→中→大"的粗略方向，
@@ -102,9 +107,13 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
             </div>
           </div>
 
-          <div className="flex items-end gap-6">
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">综合评分</div>
+          {/* `flex-wrap` + `min-w-0` 修补 375px 横向溢出：
+              三块（综合评分 / 会烧概率 / 等级）在窄屏并排时会撑到 395px，
+              而视口只有 375 —— `scrollWidth` 实测 792（含 Hero 右侧流体背景）。
+              窄屏改为换行堆叠，宽屏仍是一行。 */}
+          <div className="flex min-w-0 flex-wrap items-end gap-x-6 gap-y-3">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55">综合评分</div>
               <div className="mt-1 flex items-baseline gap-1">
                 <span className="num text-3xl font-semibold leading-none text-white sm:text-4xl">
                   <AnimatedNumber value={p.score} digits={0} />
@@ -116,10 +125,10 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               </div>
             </div>
 
-            <div>
-              <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55">
                 会烧概率
-                <InfoTip text="P(会烧)：达到「小烧」及以上的估计概率。与下方「若烧多强」是两个独立的头 —— 把二者压进一个分数，会让「高概率小烧」和「低概率大烧」无法区分。当前为未校准估计（calibration=0）。" />
+                <InfoTip align="center" text="P(会烧)：达到「小烧」及以上的估计概率。与下方「若烧多强」是两个独立的头 —— 把二者压进一个分数，会让「高概率小烧」和「低概率大烧」无法区分。当前为未校准估计（calibration=0）。" />
               </div>
               <div className="mt-1 flex items-baseline gap-1">
                 <span className="num text-2xl font-semibold leading-none text-white sm:text-3xl">
@@ -127,7 +136,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
                 </span>
                 <span className="text-xs text-white/45">%</span>
                 <span
-                  className="ml-1 rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+                  className="ml-1 rounded-md px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-wider"
                   style={{
                     background:
                       p.dual.advisory === 'go'
@@ -147,7 +156,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
               </div>
               {p.dual.ensemble && (
                 <div
-                  className="num mt-1 text-[9px] leading-tight text-white/45"
+                  className="num mt-1 text-[11px] leading-tight text-white/45"
                   title={`集合预报：ECMWF ${p.dual.ensemble.members} 个扰动成员中，${Math.round(
                     p.dual.ensemble.probability * 100,
                   )}% 落在「能烧」区间。成员强度 p10/p50/p90 = ${p.dual.ensemble.p10.toFixed(
@@ -177,7 +186,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
             </div>
 
             <div>
-              <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">等级</div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55">等级</div>
               <div
                 className="mt-1 inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[15px] font-bold leading-none"
                 style={{
@@ -187,7 +196,7 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
                 }}
               >
                 {p.gradeLabel}
-                <span className="text-[9px] font-medium uppercase tracking-wider opacity-65">{p.gradeEn}</span>
+                <span className="text-[11px] font-medium uppercase tracking-wider opacity-65">{p.gradeEn}</span>
               </div>
               <div className="mt-1.5 flex gap-0.5">
                 {GRADE_ORDER.map((g, i) => (
@@ -228,9 +237,9 @@ export function HeroScore({ p }: { p: SunsetPredictionOutput }) {
 function HeroStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="min-w-0">
-      <div className="truncate text-[9.5px] font-medium uppercase tracking-[0.12em] text-white/45">{label}</div>
+      <div className="truncate text-[11px] font-medium uppercase tracking-[0.12em] text-white/45">{label}</div>
       <div className="num mt-0.5 text-[15px] font-semibold leading-tight text-white/92">{value}</div>
-      {sub && <div className="truncate text-[9.5px] text-white/40">{sub}</div>}
+      {sub && <div className="truncate text-[11px] text-white/40">{sub}</div>}
     </div>
   );
 }
@@ -284,13 +293,13 @@ function ConfidenceBadge({
             style={{ transition: 'stroke-dashoffset .7s cubic-bezier(.22,1,.36,1)' }}
           />
         </svg>
-        <span className="num relative text-[8.5px] font-bold" style={{ color }}>
+        <span className="num relative text-[11px] font-bold" style={{ color }}>
           {pct}
         </span>
       </div>
       <div className="leading-none">
-        <div className="text-[8.5px] font-semibold uppercase tracking-[0.1em] text-white/50">置信度</div>
-        <div className="num mt-0.5 text-[10px] font-medium text-white/80">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-white/50">置信度</div>
+        <div className="num mt-0.5 text-[11px] font-medium text-white/80">
           {dataWarning ? `数据仅 ${(completeness * 100).toFixed(0)}%` : `分歧 ${(disagreement * 100).toFixed(0)}%`}
         </div>
       </div>
@@ -370,8 +379,10 @@ function WarnIcon() {
 }
 
 function compass(deg: number): string {
-  const n = ['北', '东北', '东', '东南', '南', '西南', '西', '西北'];
-  return n[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+  // 与引擎共用 CMA 规范 16 方位（第四轮 NEW-07）。
+  // 上一版这里自带一套 8 方位，于是同一页面顶部写「西南」、
+  // 下方引擎文案写「西西南」，两套体系打架。
+  return compassName16(deg);
 }
 
 /**

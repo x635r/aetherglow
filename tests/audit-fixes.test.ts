@@ -225,3 +225,107 @@ describe('审查修复：连续光谱与方位边界', () => {
     expect(compassLabel(359)).not.toContain('NaN');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// 第四轮审查（针对 3fafd82）
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('审查修复：NEW-01 散射天窗必须计入本层云幕', () => {
+  /** 单层满铺：整条光路都被同一个云幕占据 */
+  const singleDeck = (cover: number) => {
+    const rings = [0, 30, 80, 150, 280, 450].map((ringKm) => {
+      const c = {} as Record<LevelKey, number>;
+      const h = {} as Record<LevelKey, number>;
+      const vis = {} as Record<LevelKey, boolean>;
+      const filler = {} as Record<LevelKey, number>;
+      for (const k of LEVEL_KEYS) {
+        c[k] = k === '600' ? cover : 0;
+        h[k] = { '1000': 110, '925': 780, '850': 1500, '700': 3000, '600': 4200, '500': 5500, '400': 7200, '300': 9200, '250': 10400, '200': 11800 }[k];
+        vis[k] = true;
+        filler[k] = h[k];
+      }
+      return {
+        ringKm, point: { lat: 31.23, lon: 121.47 },
+        sample: {
+          timeMs: EVENT, cloud: c, levelHeightM: filler, levelTempC: {},
+          cloudLow: 0, cloudMid: 0, cloudHigh: 0, cloudTotal: 0,
+          precipitation: 0, humidity: 60, visibilityM: 25000, surfacePressureHpa: 1013,
+        },
+        cover: Object.fromEntries(LEVEL_KEYS.map((k) => [k, k === '600' ? cover : 0])) as Record<LevelKey, number>,
+        heightM: filler, tempC: {}, rh: {}, visible: vis,
+      };
+    });
+    return rings;
+  };
+
+  it('100% 满铺密云的天窗必须闭合（不能靠散射把光原样补回）', () => {
+    const r = rayMarchingTransmittance(4200, -1.5, singleDeck(1.0), FLAT);
+    // 上一版：直射 τ≈20 已完全不透明，有效照明度却仍有 0.857
+    expect(r.perLevelTransmittance['600']).toBeLessThan(0.2);
+  });
+
+  it('破碎黄金层（40%）仍应是一块明亮的画布', () => {
+    const r = rayMarchingTransmittance(4200, -1.5, singleDeck(0.4), FLAT);
+    expect(r.perLevelTransmittance['600']).toBeGreaterThan(0.8);
+  });
+
+  it('云幕封堵随覆盖率单调（满铺必然比破碎暗）', () => {
+    const lo = rayMarchingTransmittance(4200, -1.5, singleDeck(0.6), FLAT).perLevelTransmittance['600'];
+    const hi = rayMarchingTransmittance(4200, -1.5, singleDeck(0.95), FLAT).perLevelTransmittance['600'];
+    expect(hi).toBeLessThan(lo);
+  });
+
+  it('上层的薄卷云不得被当成不透明遮板（原 `1−c` 的错误）', () => {
+    // 黄金层 45% + 满铺卷云：卷云是画布，不该把黄金层压黑
+    const a = predict(buildScenario(scenario({ cover: { '600': 0.45, '500': 0.4 } })));
+    const b = predict(buildScenario(scenario({ cover: { '600': 0.45, '500': 0.4, '300': 0.9 } })));
+    expect(b.vividness).toBeGreaterThan(a.vividness * 0.85);
+  });
+});
+
+describe('审查修复：NEW-03 朝霞 COT 参考时刻必须用辐射窗口中点', () => {
+  /**
+   * 朝霞与晚霞在对称天气下应给出**对称**的 COT 标定。
+   *
+   * 上一版 `alt: Math.max(bestAlt, midAlt)` 在朝霞侧锁死偏高的 bestAlt
+   * （实测高估 2.7–5.0°），使 T_clear 偏大、COT 偏大、透光的朝霞云被判成黑云。
+   */
+  const cotFor = (mode: 'sunrise' | 'sunset'): number => {
+    const cover = { '600': 0.5, '500': 0.45 } as Partial<Record<LevelKey, number>>;
+    const b = buildScenario(scenario({ cover }), 'ecmwf');
+    // 同一片大气、同一 AOD 与辐射：把日出/日落事件放在对称时刻，
+    // 引擎应按各自 mode 找到太阳高度角相近的参考时刻。
+    const isSunrise = mode === 'sunrise';
+    const eventMs = isSunrise ? Date.UTC(2026, 10, 3, 22, 40) : Date.UTC(2026, 10, 3, 9, 5);
+    const p = predictSunset({
+      point: { lat: 31.23, lon: 121.47 }, mode, observerHeightM: 0,
+      bundle: b, primaryModel: 'ecmwf', timezoneOffsetSeconds: 28800, timezone: 'Asia/Shanghai',
+      locationLabel: 'audit', eventMs,
+      daily: isSunrise
+        ? { sunriseMs: eventMs, sunsetMs: null }
+        : { sunriseMs: null, sunsetMs: eventMs },
+      compareModels: ['ecmwf'],
+    });
+    const golden = p.layers.find((l) => l.key === '600');
+    return golden?.transmittance ?? -1;
+  };
+
+  it('朝霞的黄金层受光不被系统性判死', () => {
+    // 上一版朝霞 COT 高估 ⇒ 黄金层透过率被压到远低于晚霞
+    const rise = cotFor('sunrise');
+    const set = cotFor('sunset');
+    expect(rise).toBeGreaterThan(0);
+    // 对称大气下两者应在同一量级（不要求相等：真实太阳路径并不对称）
+    expect(rise).toBeGreaterThan(set * 0.5);
+  });
+});
+
+describe('审查修复：NEW-02 远端外推的注释必须与实现一致', () => {
+  it('末尾环的上游不会变成虚构晴空（环透过率随距离单调不增）', () => {
+    const p = predict(buildScenario(scenario({ cover: { '700': 0.4, '600': 0.5 } })));
+    const vis = p.rings.filter((r) => !r.terrainBlocked);
+    for (let i = 1; i < vis.length; i++) {
+      expect(vis[i].transmittance).toBeLessThanOrEqual(vis[i - 1].transmittance + 1e-9);
+    }
+  });
+});

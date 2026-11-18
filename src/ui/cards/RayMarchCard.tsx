@@ -123,7 +123,7 @@ export function RayMarchCard() {
       }
       right={
         <div className="flex items-center gap-2">
-          <span className="num hidden rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[10.5px] text-slate-300 sm:block">
+          <span className="num hidden rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-300 sm:block">
             {clock} · {offsetLabel}
           </span>
           <InfoTip text="光路几何 H_ray(d) = H_target + d·tanα + d²/(2·R_eff)，R_eff = 7435km（含标准大气折射）。地形高于光线即判定遮挡。环标签上的百分比是该环云幕的**受光比例**，不是剩余透过率。" />
@@ -133,7 +133,7 @@ export function RayMarchCard() {
     >
       {/* 层选择 */}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <span className="text-[9.5px] font-semibold uppercase tracking-[0.13em] text-slate-500">目标层</span>
+        <span className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500">目标层</span>
         {LEVEL_KEYS.map((k) => {
           const lv = LEVEL_BY_KEY[k];
           const on = k === focusLevel;
@@ -144,7 +144,7 @@ export function RayMarchCard() {
               key={k}
               type="button"
               onClick={() => setFocusLevel(k)}
-              className="rounded-lg border px-2 py-1 text-[10px] font-medium transition-all"
+              className="rounded-lg border px-2 py-1 text-[11px] font-medium transition-all"
               style={{
                 borderColor: on ? `${roleColor}88` : 'rgba(255,255,255,0.09)',
                 background: on ? `${roleColor}22` : 'rgba(255,255,255,0.025)',
@@ -175,7 +175,7 @@ export function RayMarchCard() {
         />
         {hover && (
           <div
-            className="pointer-events-none absolute z-20 max-w-[240px] rounded-lg border border-white/15 bg-[#060a12]/96 px-2 py-1.5 text-[10px] leading-snug text-slate-200 shadow-xl backdrop-blur-md"
+            className="pointer-events-none absolute z-20 max-w-[240px] rounded-lg border border-white/15 bg-[#060a12]/96 px-2 py-1.5 text-[11px] leading-snug text-slate-200 shadow-xl backdrop-blur-md"
             style={{
               left: Math.min(hover.x + 11, size.w - 200),
               top: Math.max(hover.y - 42, 4),
@@ -197,7 +197,7 @@ export function RayMarchCard() {
             { c: '#98b4d2', t: '中云' },
             { c: '#5a84a6', t: '地形' },
           ].map((l) => (
-            <span key={l.t} className="flex items-center gap-1 text-[9px] text-slate-300">
+            <span key={l.t} className="flex items-center gap-1 text-[11px] text-slate-300">
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: l.c }} />
               {l.t}
             </span>
@@ -207,14 +207,14 @@ export function RayMarchCard() {
 
       {/* 时间滑块 */}
       <div className="mt-3">
-        <div className="flex items-center justify-between text-[10px] text-slate-400">
+        <div className="flex items-center justify-between text-[11px] text-slate-400">
           <span className="num font-medium">
             {sunWord}前 20 分
           </span>
           <button
             type="button"
             onClick={() => setScrub(0)}
-            className="rounded-md border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[9.5px] text-slate-300 transition-colors hover:border-amber-300/40 hover:text-amber-200"
+            className="rounded-md border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[11px] text-slate-300 transition-colors hover:border-amber-300/40 hover:text-amber-200"
           >
             对齐 {sunWord}时刻
           </button>
@@ -230,7 +230,7 @@ export function RayMarchCard() {
           onChange={(e) => setScrub(Number(e.target.value))}
           aria-label="光路时间滑块"
         />
-        <div className="num mt-0.5 flex justify-between text-[9px] text-slate-500">
+        <div className="num mt-0.5 flex justify-between text-[11px] text-slate-500">
           {[-20, -10, 0, 10, 20, 30, 40].map((t) => (
             <span key={t} className={t === scrubMin ? 'font-bold text-amber-300' : ''}>
               {t > 0 ? `+${t}` : t}
@@ -263,7 +263,7 @@ export function RayMarchCard() {
 function MiniStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div className="rounded-lg border border-white/[0.07] bg-white/[0.025] px-2.5 py-1.5">
-      <div className="text-[9px] uppercase tracking-[0.11em] text-slate-500">{label}</div>
+      <div className="text-[11px] uppercase tracking-[0.11em] text-slate-500">{label}</div>
       <div className="num mt-0.5 text-[12.5px] font-semibold" style={{ color: accent ?? 'rgba(226,236,250,0.92)' }}>
         {value}
       </div>

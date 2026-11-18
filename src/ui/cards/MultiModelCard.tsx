@@ -87,8 +87,8 @@ export function MultiModelCard({
             />
           );
         })}
-        <span className="num absolute bottom-0.5 left-1 text-[7.5px] text-slate-500">0</span>
-        <span className="num absolute bottom-0.5 right-1 text-[7.5px] text-slate-500">{VIVIDNESS_CEILING.toFixed(1)}</span>
+        <span className="num absolute bottom-0.5 left-1 text-[11px] text-slate-500">0</span>
+        <span className="num absolute bottom-0.5 right-1 text-[11px] text-slate-500">{VIVIDNESS_CEILING.toFixed(1)}</span>
       </div>
 
       {/* 各源明细 */}
@@ -106,7 +106,7 @@ export function MultiModelCard({
               title={isPrimary ? '当前主源' : '点击切换为主源'}
             >
               <Dot color={MODEL_META[m.model].color} />
-              <span className="w-10 shrink-0 text-[9.5px] font-semibold tracking-wide" style={{ color: MODEL_META[m.model].color }}>
+              <span className="w-10 shrink-0 text-[11px] font-semibold tracking-wide" style={{ color: MODEL_META[m.model].color }}>
                 {MODEL_META[m.model].short}
               </span>
               <div className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.08]">
@@ -118,11 +118,11 @@ export function MultiModelCard({
                   }}
                 />
               </div>
-              <span className="num w-8 shrink-0 text-right text-[10px] font-semibold text-slate-200">
+              <span className="num w-8 shrink-0 text-right text-[11px] font-semibold text-slate-200">
                 {m.peakVividness.toFixed(2)}
               </span>
               {isPrimary && (
-                <span className="shrink-0 rounded bg-amber-300/20 px-1 text-[7.5px] font-bold uppercase tracking-wider text-amber-200">
+                <span className="shrink-0 rounded bg-amber-300/20 px-1 text-[11px] font-bold uppercase tracking-wider text-amber-200">
                   主
                 </span>
               )}
@@ -131,13 +131,13 @@ export function MultiModelCard({
         })}
       </div>
 
-      <div className="mt-2.5 flex items-center justify-between border-t border-white/[0.07] pt-2 text-[9.5px]">
+      <div className="mt-2.5 flex items-center justify-between border-t border-white/[0.07] pt-2 text-[11px]">
         <span className="text-slate-500">置信度</span>
         <span className="num font-semibold" style={{ color: agreeColor }}>
           {(p.confidence * 100).toFixed(0)}%
         </span>
       </div>
-      <p className="mt-1 text-[9.5px] leading-snug text-slate-500 break-anywhere">
+      <p className="mt-1 text-[11px] leading-snug text-slate-500 break-anywhere">
         {d < 0.18
           ? '三源高度收敛，可放心出发。'
           : d < 0.42
@@ -146,7 +146,7 @@ export function MultiModelCard({
       </p>
       <div className="mt-1.5 flex flex-wrap gap-1">
         {models.map((m) => (
-          <span key={m} className="chip !px-1.5 !py-0.5 !text-[8.5px]">
+          <span key={m} className="chip !px-1.5 !py-0.5 !text-[11px]">
             {MODEL_META[m].short}
           </span>
         ))}

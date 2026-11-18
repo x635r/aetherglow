@@ -34,29 +34,29 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
           }}
         >
           <div className="flex items-start gap-2">
-            <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-rose-500/20 text-[9px] font-bold text-rose-300">
+            <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-rose-500/20 text-[11px] font-bold text-rose-300">
               !
             </span>
             <div className="min-w-0">
               <div className="text-[11.5px] font-semibold text-rose-200">{veto.title}</div>
-              <p className="mt-0.5 text-[10px] leading-relaxed text-rose-200/70 break-anywhere">{veto.detail}</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-rose-200/70 break-anywhere">{veto.detail}</p>
             </div>
-            <span className="num ml-auto shrink-0 rounded bg-black/30 px-1.5 py-0.5 text-[9px] text-rose-300">
+            <span className="num ml-auto shrink-0 rounded bg-black/30 px-1.5 py-0.5 text-[11px] text-rose-300">
               ×{veto.penalty.toFixed(2)}
             </span>
           </div>
         </div>
       ) : (
         <div className="mb-2.5 flex items-center gap-2 rounded-xl border border-teal-300/25 bg-teal-400/[0.07] px-2.5 py-2">
-          <span className="grid h-4 w-4 place-items-center rounded-full bg-teal-400/20 text-[9px] font-bold text-teal-300">✓</span>
+          <span className="grid h-4 w-4 place-items-center rounded-full bg-teal-400/20 text-[11px] font-bold text-teal-300">✓</span>
           <span className="text-[11px] font-medium text-teal-200">{veto.title}</span>
-          <span className="ml-auto text-[9.5px] text-teal-200/60">光路无否决</span>
+          <span className="ml-auto text-[11px] text-teal-200/60">光路无否决</span>
         </div>
       )}
 
       {/* 逐层表 */}
       <div className="overflow-hidden rounded-lg border border-white/[0.07]">
-        <div className="grid grid-cols-[46px_1fr_38px_38px_38px_42px] gap-1 border-b border-white/[0.07] bg-white/[0.03] px-2 py-1.5 text-[8.5px] font-semibold uppercase tracking-[0.06em] text-slate-500">
+        <div className="grid grid-cols-[46px_1fr_38px_38px_38px_42px] gap-1 border-b border-white/[0.07] bg-white/[0.03] px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
           <span>层</span>
           <span>云量</span>
           <span className="text-right">质量</span>
@@ -78,7 +78,7 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
                   : undefined
               }
             >
-              <span className="num flex items-center gap-1 text-[9.5px]" style={{ color }}>
+              <span className="num flex items-center gap-1 text-[11px]" style={{ color }}>
                 <span className="h-1.5 w-1.5 shrink-0 rounded-sm" style={{ background: color }} />
                 {LEVEL_BY_KEY[l.key].hpa}
               </span>
@@ -86,19 +86,19 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
                 <div className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.07]">
                   <div className="h-full rounded-full" style={{ width: `${l.cover}%`, background: color, opacity: 0.7 }} />
                 </div>
-                <span className="num w-6 shrink-0 text-right text-[9px] text-slate-400">{Math.round(l.cover)}</span>
+                <span className="num w-6 shrink-0 text-right text-[11px] text-slate-400">{Math.round(l.cover)}</span>
               </div>
-              <span className="num text-right text-[9px] text-slate-300">{l.quality.toFixed(2)}</span>
+              <span className="num text-right text-[11px] text-slate-300">{l.quality.toFixed(2)}</span>
               <span
-                className="num text-right text-[9px]"
+                className="num text-right text-[11px]"
                 style={{ color: l.terrainBlocked ? '#ff6b6b' : 'rgba(180,196,216,0.9)' }}
               >
                 {l.transmittance.toFixed(2)}
               </span>
-              <span className="num text-right text-[9px] text-slate-400">
+              <span className="num text-right text-[11px] text-slate-400">
                 {l.visible >= 1 ? '✓' : l.visible > 0.1 ? '~' : '✗'}
               </span>
-              <span className="num text-right text-[9.5px] font-semibold" style={{ color: l.contribution > 0.05 ? color : 'rgba(126,146,172,0.8)' }}>
+              <span className="num text-right text-[11px] font-semibold" style={{ color: l.contribution > 0.05 ? color : 'rgba(126,146,172,0.8)' }}>
                 {l.contribution.toFixed(2)}
               </span>
             </div>
@@ -109,8 +109,8 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
       {/* 环渗透 */}
       <div className="mt-2.5">
         <div className="mb-1.5 flex items-center justify-between">
-          <span className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">光路环衰减</span>
-          <span className="text-[9px] text-slate-500">600hPa 光路 · 橙色=地形</span>
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">光路环衰减</span>
+          <span className="text-[11px] text-slate-500">600hPa 光路 · 橙色=地形</span>
         </div>
         <div className="flex items-end gap-1">
           {p.rings.map((r) => {
@@ -127,7 +127,7 @@ export function DiagnosticsCard({ p }: { p: SunsetPredictionOutput }) {
                   }}
                   title={`${r.ringKm}km · T=${r.transmittance.toFixed(2)} · 云 ${Math.round(r.cloudCoverTotal)}%`}
                 />
-                <span className="num text-[7.5px] text-slate-500">{r.ringKm}</span>
+                <span className="num text-[11px] text-slate-500">{r.ringKm}</span>
               </div>
             );
           })}
@@ -159,8 +159,8 @@ function lowestLayerLabel(p: SunsetPredictionOutput): string {
 function SmallStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div className="rounded-md border border-white/[0.06] bg-white/[0.022] px-1.5 py-1">
-      <div className="text-[7.5px] uppercase tracking-[0.08em] text-slate-500">{label}</div>
-      <div className="num mt-0.5 truncate text-[10px] font-semibold" style={{ color: accent ?? 'rgba(214,226,242,0.9)' }}>
+      <div className="text-[11px] uppercase tracking-[0.08em] text-slate-500">{label}</div>
+      <div className="num mt-0.5 truncate text-[11px] font-semibold" style={{ color: accent ?? 'rgba(214,226,242,0.9)' }}>
         {value}
       </div>
     </div>

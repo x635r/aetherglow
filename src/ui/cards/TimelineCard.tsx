@@ -166,7 +166,7 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
 
   return (
     <Panel
-      className="col-span-full lg:col-span-6 xl:col-span-4"
+      className="col-span-full xl:col-span-7"
       title="分钟级霞光演变"
       subtitle="T0 = 日出/日落时刻 · 每 2 分钟一帧 · 虚线为对照模型"
       right={<InfoTip text="曲线为 31 帧 × 10 层的光路积分结果。起烧/结束阈值取峰值的 35%；二烧窗口按太阳高度角 −1.4° ~ −7.4°（紫光实测区间）自动选取。" />}
@@ -178,14 +178,14 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
 
       {/* 图例（自绘，避免 Chart.js legend 占高） */}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="flex items-center gap-1 text-[9px] text-slate-300">
+        <span className="flex items-center gap-1 text-[11px] text-slate-300">
           <span className="h-[2px] w-3.5 rounded" style={{ background: p.theme.accent }} />
           主源
         </span>
         {p.modelPeaks
           .filter((m) => m.model !== p.primaryModel)
           .map((m) => (
-            <span key={m.model} className="flex items-center gap-1 text-[9px] text-slate-400">
+            <span key={m.model} className="flex items-center gap-1 text-[11px] text-slate-400">
               <span className="h-[2px] w-3.5 rounded" style={{ background: `${MODEL_META[m.model].color}aa` }} />
               {MODEL_META[m.model].short}
             </span>
@@ -221,7 +221,7 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
             }}
           />
         </div>
-        <div className="mt-1 flex justify-between text-[9px] text-slate-500">
+        <div className="mt-1 flex justify-between text-[11px] text-slate-500">
           <span>−20′</span>
           <span className={Math.abs(peakOff) <= 6 ? 'font-semibold text-amber-300' : ''}>T0</span>
           <span>+20′</span>
@@ -243,8 +243,8 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
       {/* 分层贡献 */}
       <div className="mt-3 space-y-1.5">
         <div className="flex items-center justify-between">
-          <span className="text-[9px] font-semibold uppercase tracking-[0.13em] text-slate-500">峰值层贡献</span>
-          <span className="text-[9px] text-slate-500">质量×受光×透过×可见</span>
+          <span className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500">峰值层贡献</span>
+          <span className="text-[11px] text-slate-500">质量×受光×透过×可见</span>
         </div>
         {[...p.layers]
           .sort((a, b) => b.contribution - a.contribution)
@@ -253,14 +253,14 @@ export function TimelineCard({ p }: { p: SunsetPredictionOutput }) {
             const color = ROLE_COLOR[l.role] ?? '#98b4d2';
             return (
               <div key={l.key} className="flex items-center gap-2">
-                <span className="num w-10 shrink-0 text-[9.5px] text-slate-500">{l.key}hPa</span>
+                <span className="num w-10 shrink-0 text-[11px] text-slate-500">{l.key}hPa</span>
                 <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.07]">
                   <div
                     className="h-full rounded-full transition-[width] duration-500"
                     style={{ width: `${(l.contribution / maxContrib) * 100}%`, background: color, boxShadow: `0 0 8px ${color}66` }}
                   />
                 </div>
-                <span className="num w-8 shrink-0 text-right text-[9.5px] text-slate-400">
+                <span className="num w-8 shrink-0 text-right text-[11px] text-slate-400">
                   {l.contribution.toFixed(2)}
                 </span>
               </div>
@@ -290,7 +290,7 @@ function PhaseStat({
         background: active && accent ? `${accent}12` : 'rgba(255,255,255,0.025)',
       }}
     >
-      <div className="text-[9px] uppercase tracking-[0.1em] text-slate-500">{label}</div>
+      <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">{label}</div>
       <div className="num mt-0.5 text-[13px] font-semibold" style={{ color: accent ?? 'rgba(226,236,250,0.9)' }}>
         {value}
       </div>

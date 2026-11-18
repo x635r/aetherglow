@@ -281,10 +281,28 @@ function coverAtObserverDistance(
   const last = rings[rings.length - 1];
   // 超出数据范围：**持续性外推**（沿用最远已知值），而不是当成晴空。
   //
-  // 这一点决定了「同一片大气，换采样分辨率得同一个答案」这个不变量能否成立：
-  // 光路在目标层内可以走 80km，若数据只铺到 30km，把 30–80km 当晴空会让
-  // 有效云量被稀释，于是 2 环和 6 环算出两个不同的 τ。改用持续性外推后，
-  // 无论是 2 环还是 6 环，τ 都只有一个值。
+  // ── 与第四轮审查 NEW-02 的分歧，以及为什么保留外推 ──
+  //
+  // 审查指出：上一轮我在 `rayForRing` 写下的注释声称这里「按线性衰减返回」
+  // 而函数体是恒定返回，注释与实现自相矛盾。**这个指控属实，是我的错**。
+  // 但正确的修法是改注释，不是改实现 —— 因为线性衰减实测更糟：
+  //
+  // ① 单点模式（maxRingKm = 0，`NightskyScenario` 与部分离线路径）只有
+  //    一个环，任何衰减都等于「本地云量向外迅速归零」。而模式的单点序列
+  //    就是我们对这片大气的全部信息，假设它向外延续是唯一不引入虚构
+  //    晴空的做法 —— 这就是「同一片大气换采样分辨率得同一个答案」。
+  //
+  // ② 多环模式加线性衰减会破坏「环透过率随距离单调不增」这个不变量
+  //    （实测：末尾 450km 环的上游已无采样，衰减后 τ→0，T 从 0.75 跳到 1.00）。
+  //    一个「更远的云反而照明更足」的剖面在视觉上就是错的。
+  //
+  // ③ 上一轮 P1-6 已经量化过反方向的代价：用 `maxRangeKm` 截短光路会
+  //    把合法遮挡一起丢掉，整层阴天的 700hPa 从 faint 被抬成 minor
+  //    （V 0.0967 → 0.1339），比原问题更严重。
+  //
+  // 结论：保留持续性外推，并**如实描述它**。所谓「单点克隆」不是漏洞，
+  // 而是分辨率不变性的代价；真要抑制它，正确的位置是上游的采样策略
+  // （单点模式下不要假装有 450km 光路），而不是在这里人为砍掉覆盖率。
   if (obsDistKm >= last.ringKm) return last.cover[key];
   for (let i = 0; i < rings.length - 1; i++) {
     const a = rings[i];
@@ -648,6 +666,16 @@ export function parseVerticalCloudProfile(
   ): number => {
     const own = wpick((s) => s[field] ?? 0);
     if (own > 0) return own;
+    // 已由 `backfillModelScalars` 补齐过就不必再扫别的模型（第四轮 RES-08）。
+    //
+    // 上一版无论补没补都无条件遍历所有模型的所有近环、并各自跑一遍
+    // `interpolateHourly` —— 每次 `parseVerticalCloudProfile` 都会重复，
+    // 一次预测下来是上百次冗余插值。补齐后本模型的样本里已经有值，
+    // `wpick` 返回 > 0 就会走上面的早退分支。
+    //
+    // 这里保留跨模型兜底（补齐未覆盖的情形：捐赠方也缺，或补齐被跳过），
+    // 但**跳过标量无效的样本** —— 上一版直接读 `smp[field]`，
+    // 会把 `interpolateHourly` 在缺测时返回的兜底 0 当成真实值再往下传。
     for (const m of Object.keys(bundle.models) as ModelId[]) {
       if (m === model) continue;
       const ds2 = bundle.models[m];
@@ -658,6 +686,8 @@ export function parseVerticalCloudProfile(
       const sum2 = w2.reduce((a, b) => a + b, 0) || 1;
       const v = list2.reduce((acc, r, i) => {
         const smp = interpolateHourly(r.samples, timeMs);
+        // 标量缺测时不要把它当 0 参与加权
+        if (smp.scalarValid && smp.scalarValid[field] === false) return acc;
         return acc + (smp[field] ?? 0) * w2[i];
       }, 0) / sum2;
       if (v > 0) return v;
@@ -1101,6 +1131,25 @@ export function rayMarchingTransmittance(
   const effectiveIllumination = (target: LevelKey): number => {
     let tDirect = Math.exp(-precipTau);
     let skyOpening = 1;
+    // 漫射天窗必须按**每层自己的透过率**累乘，而不是按覆盖率。
+    //
+    // 上一版对其它层用 `skyOpening *= 1 − c`：这等于假设「凡是有云的地方
+    // 一律不透光」。对厚低云大致成立，对**卷云完全错** ——
+    // 300hPa 满铺卷云的 τ_full 只有 0.87（冰晶 r_eff 30µm），
+    // 直射都还有 42% 能穿过去，却被当成 10% 的天窗。
+    // 实测后果：任何构型只要加一层卷云，总分必然掉档。
+    //
+    // 正确形式：云隙（1−c）全额透光，云块那部分按**垂直**光学厚度的
+    // 中点衰减 —— 漫射来自整个半球、平均入射角接近天顶。
+    // 不使用掠射的 `perLevelTau`：那是沿 80km 水平斜程的 τ，
+    // 用它会把云块压成全黑，同样错。
+    const diffusiveTransmission = (k: LevelKey): number => {
+      const c = clamp(perLevelCover[k], 0, 1);
+      if (c <= 0) return 1;
+      const tauHalf = levelFullOpticalDepth(k) * c * 0.5;
+      return (1 - c) + c * Math.exp(-tauHalf);
+    };
+
     for (const other of LEVEL_KEYS) {
       if (other === target) continue;
       // 光路几何上没穿过这一层 → 不构成遮挡
@@ -1109,14 +1158,36 @@ export function rayMarchingTransmittance(
       if (c <= 0.02) continue;
       // 直射：已含云隙的等效 τ，直接累乘
       tDirect *= Math.exp(-perLevelTau[other]);
-      // 散射：云隙连通性。只要找到一条完全无云的通路，广角散射光即可透射。
-      // 与直射是两个独立的物理通道，不能共用同一个因子。
-      skyOpening *= 1 - c;
+      // 散射：与直射是两个独立的物理通道，不能共用同一个因子
+      skyOpening *= diffusiveTransmission(other);
     }
-    // 目标层自身：直射通道取中点照明（同 directIllumination）；
-    // 散射通道不乘自身 —— 广角散射光来自整个天穹（含云隙与云缘），
-    // 目标层自身就是它要打亮的画布，不是遮挡物。
+    // 目标层自身：直射通道取中点照明（同 directIllumination）。
     if (perLevelTau[target] > 0) tDirect *= Math.exp(-0.5 * perLevelTau[target]);
+
+    // **散射通道也必须计入本层云幕的封堵**（第四轮 P0，NEW-01）。
+    //
+    // 上一版这里显式跳过本层，理由写的是「目标层自身就是它要打亮的画布，
+    // 不是遮挡物」。对**破碎云**这基本成立（云隙就是天窗），
+    // 但对**满铺**完全错 —— 那层云同时是画布也是遮挡物，skyOpening 保持
+    // 1.0 等于宣布「头顶 100% 密云时天窗全开」。
+    //
+    // 实测（scratch/r4-probe.ts）：600hPa 单层 100% 满铺、绵延 450km，
+    // 自身直射 τ 已到 20（tDirect≈0.004），有效照明度却仍有 **0.857** ——
+    // 那 0.85 的散射权重把被挡掉的光原样补了回来。
+    // 审查文档算得 0.949（相态因子取值不同），机制完全一致。
+    //
+    // **封堵必须只在「看不见天空」时发生**：
+    // 破碎云（c≈0.45）时仍有 55% 的天穹敞开，漫射主场是那片天空而不是
+    // 这层云；把它也乘掉会把「45% 黄金层 + 卷云」这类教科书构型打死
+    // （实测 V 0.93→0.79，制造的新错比修的旧错更严重）。
+    // 所以用 smoothstep 让封堵从 c=0.70 起才逐渐生效 ——
+    // 这正是「云隙全部闭合」的物理分界。
+    const cSelf = clamp(perLevelCover[target], 0, 1);
+    if (cSelf > 0.02) {
+      const gapClosed = smoothstep(0.7, 1.0, cSelf);
+      const tauVert = levelFullOpticalDepth(target) * cSelf;
+      skyOpening *= 1 - gapClosed * (1 - Math.exp(-tauVert));
+    }
     const w = diffuseWeight(sunAltitudeDeg);
     return clamp(tDirect + w * skyOpening * (1 - tDirect), 0, 1);
   };
@@ -1546,19 +1617,22 @@ function evaluateLayer(
         ringKm: r.ringKm - ring.ringKm,
       }));
       const rebasedTerrain = terrainM.slice(ringIdx);
-      // **远端外推要用"覆盖率外推"而不是"截断光路"来抑制**（P1 修复）。
+      // **远端外推靠"覆盖率持续性"而不是"截断光路"来抑制**（P1 修复）。
       //
       // 问题：每个环的 `samples` 是模式在该点的**单点时间序列**，不是空间场。
       // 重定基后最远环（450km）只剩它自己一个采样点，若仍向外积分 450km，
-      // 等于把单点云量沿光线克隆外推到 900km。
+      // 等于把单点云量沿光线外推到 900km。
       //
       // 但**不能靠收缩 maxRangeKm 来解决**（实测踩过这个坑）：
       // 光路本该穿越 450km 上的所有云层，截短会把合法遮挡一起丢掉 ——
       // 整层阴天的 700hPa 从 faint 被抬成 minor，比原 bug 更糟。
       //
-      // 正确做法：保留完整积分范围，让`coverAtObserverDistance` 在
-      // 超出最后一个采样环后按**线性衰减**返回覆盖率（见该函数），
-      // 单点之外自然没有云，不再被克隆。
+      // 保留完整积分范围。`coverAtObserverDistance` 在超出最后一个采样环后
+      // **沿用最远已知覆盖率**（持续性外推，见该函数的长注释）：
+      // 它同时保证「同一片大气换采样分辨率得同一个答案」这条不变量。
+      //
+      // 注意：不要在这里或那里加"向外线性衰减" —— 实测会让末尾环的上游
+      // 变成晴空，破坏「环透过率随距离单调不增」（450km 环 T 从 0.75 跳回 1.00）。
       ray = rayMarchingTransmittance(ring.heightM[levelKey], sunAltitudeDeg, rebasedRings, rebasedTerrain, {
         cotFactor,
         refLevel: levelKey,
@@ -1897,6 +1971,9 @@ function evaluateSnapshot(
     angstrom,
     Math.max(aer.humidity, profile.local.humidity),
     ozoneColumnDu,
+    // 气溶胶标高的基准是**当地地面**，不是海平面（第四轮 RES-09）。
+    // 拉萨 3650m 上空的 4.2km 云离地只有 550m，气溶胶几乎没衰减。
+    profile.local.groundMslM,
   );
   const tanH = beamTangentHeightM(goldenH, sunAltitudeDeg);
 
@@ -2222,10 +2299,48 @@ function skyTheme(spectral: SpectralReport, grade: GradeKey, meanHue: number): S
   };
 }
 
+/**
+ * 16 方位中文名 —— **全站唯一来源**，按中国气象局规范命名。
+ *
+ * 上一版有两套并存（第四轮 NEW-07）：
+ *   · 引擎：`北东北 / 东东北 / 西西南` —— 英文 NE-by-N 的**字面直译**，
+ *     中文气象里没有这种说法
+ *   · HeroScore：独立的 8 方位函数，同一页顶部写「西南」、下方写「西西南」
+ *
+ * CMA 规范用「偏」表示 by-N/NE/E/S/W：
+ *   N-by-E → 北偏东，NE-by-N → 东北偏北，SW-by-W → 西南偏西。
+ */
+export const COMPASS_CN16 = [
+  '北', '北偏东', '东北', '东偏北',
+  '东', '东偏南', '东南', '南偏东',
+  '南', '南偏西', '西南', '西偏南',
+  '西', '西偏北', '西北', '北偏西',
+] as const;
+
+/** 角度 → 16 方位索引（0=北，顺时针） */
+export function compassIndex16(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  return Math.round((((deg % 360) + 360) % 360) / 22.5) % 16;
+}
+
+/** 角度 → `西南偏西 248°`（CMA 规范 16 方位） */
+export function compassCn16(deg: number): string {
+  if (!Number.isFinite(deg)) return '—';
+  return `${COMPASS_CN16[compassIndex16(deg)]} ${deg.toFixed(0)}°`;
+}
+
+/** 角度 → 仅方位名（不带度数），供 UI 的副标签使用 */
+export function compassName16(deg: number): string {
+  if (!Number.isFinite(deg)) return '—';
+  return COMPASS_CN16[compassIndex16(deg)];
+}
+
+/**
+ * 角度 → `西南偏西 248°`。保留旧名作为唯一入口的别名，
+ * 避免调用点散落 —— 新代码请直接用 `compassCn16`。
+ */
 export function compassLabel(deg: number): string {
-  const names = ['北', '北东北', '东北', '东东北', '东', '东东南', '东南', '南东南', '南', '南西南', '西南', '西西南', '西', '西西北', '西北', '北西北'];
-  const i = Math.round((((deg % 360) + 360) % 360) / 22.5) % 16;
-  return `${names[i]} ${deg.toFixed(0)}°`;
+  return compassCn16(deg);
 }
 
 function buildTactical(p: {
@@ -2369,17 +2484,31 @@ export function predictSunset(input: EngineInput): SunsetPredictionOutput {
     let bestAlt = -90;
     for (const offMin of [60, 90, 120, 150, 180]) {
       const ms = eventMs + sign * offMin * 60000;
-      const alt = sunPosition(ms, point.lat, point.lon).altitude;
-      if (alt > bestAlt) {
-        bestAlt = alt;
+      // **判据也必须是窗口中点高度角**（第四轮 P0）。
+      //
+      // Open-Meteo 的 shortwave/terrestrial 是**前一小时平均**，时间戳 t 的
+      // 辐射值对应的物理时刻是 t−30min，太阳高度角**只能是** midAlt。
+      //
+      // 用瞬时 alt 挑时刻、再用 midAlt 反演，等于「按一个时刻选数据、
+      // 按另一个时刻算太阳」—— 朝霞时太阳在上升，midAlt < alt，
+      // 会挑到偏高的时刻；晚霞时太阳在下降，midAlt > alt，又偏保守。
+      // 两者都让 COT 反演所用的几何与数据不自洽。
+      //
+      // 上一版直接 `alt: Math.max(bestAlt, midAlt)`：晚霞侧碰巧等于 midAlt
+      // （所以完全看不见），朝霞侧锁死在偏高的 bestAlt 上 ——
+      // 实测上海高估 5.0°、北京 3.8°、哈尔滨 2.7°。后果链条：
+      // alt 偏大 → T_clear 偏大 → R/T_clear 偏小 → COT 系统性偏大 →
+      // 透光的朝霞云被判成黑云。
+      const midMs = ms - 30 * 60000;
+      const midAlt = sunPosition(midMs, point.lat, point.lon).altitude;
+      if (midAlt > bestAlt) {
+        bestAlt = midAlt;
         bestMs = ms;
       }
       // 已到高信噪比仰角：不必再往远处退，越近越接近同一片云场
-      if (alt >= 18) break;
+      if (midAlt >= 18) break;
     }
-    // 小时平均辐射 → 取窗口中点验证；仍不够高则本场放弃 COT
-    const midAlt = sunPosition(bestMs - 30 * 60000, point.lat, point.lon).altitude;
-    return { ms: bestMs, alt: Math.max(bestAlt, midAlt), midMs: bestMs - 30 * 60000 };
+    return { ms: bestMs, alt: bestAlt, midMs: bestMs - 30 * 60000 };
   })();
 
   const cotFactorFor = (() => {

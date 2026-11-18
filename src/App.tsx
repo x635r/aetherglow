@@ -5,9 +5,8 @@ import { HeroScore } from './ui/cards/HeroScore';
 import { RayMarchCard } from './ui/cards/RayMarchCard';
 import { TimelineCard } from './ui/cards/TimelineCard';
 import { TacticalCard } from './ui/cards/TacticalCard';
-import { CloudProfileCard, AerosolGauge } from './ui/cards/CloudProfileCard';
-import { MultiModelCard } from './ui/cards/MultiModelCard';
-import { DiagnosticsCard } from './ui/cards/DiagnosticsCard';
+import { CloudProfileCard } from './ui/cards/CloudProfileCard';
+import { DiagnosticsStudio } from './ui/cards/DiagnosticsStudio';
 import { SkyMapCard } from './ui/cards/SkyMapCard';
 import { GRADE_THEME } from './engine/constants';
 import type { ModelId } from './engine/types';
@@ -61,23 +60,26 @@ export default function App() {
         <div className="grid grid-cols-1 gap-3 sm:gap-3.5 lg:grid-cols-12">
           {p ? (
             <>
-              {/* Row 1: Hero (全宽) */}
+              {/* Row 1: Hero 主卡（全宽） */}
               <div className="col-span-full xl:col-span-12">
                 <HeroScore p={p} />
               </div>
 
-              {/* Row 2: 光路剖面 (8) + 时间曲线 (4) */}
+              {/* Row 2: 一体化光线追踪工作台 —— 左剖面 8 列 + 右云廓线 4 列。
+                  第四轮重设计：这两张卡展示的是**同一套 10 层等压面数据**，
+                  却被拆成坐标轴正交的两张卡。现在并排等宽对齐，
+                  剖面图上的某层可以直接横向读到右侧的云量与受光率。 */}
               <RayMarchCard />
-              <TimelineCard p={p} />
-
-              {/* Row 3: 战术 (4) + 诊断 (4) + 多模型 (2) + 剖面柱 (2) */}
-              <TacticalCard p={p} />
-              <DiagnosticsCard p={p} />
-              <MultiModelCard p={p} models={query.models} onPromote={promote} />
               <CloudProfileCard p={p} />
 
-              {/* Row 4: AOD 仪表 (2) + 热力分布 (2) + 信息说明 (8) */}
-              <AerosolGauge p={p} />
+              {/* Row 3: 时间轴 7 列 + 战术 5 列 */}
+              <TimelineCard p={p} />
+              <TacticalCard p={p} />
+
+              {/* Row 4: 光谱 / 物理拆解 / 多源一致性 —— 分段切换，渐进披露 */}
+              <DiagnosticsStudio p={p} models={query.models} onPromote={promote} />
+
+              {/* Row 5: 区域热力 + 方法说明 */}
               <SkyMapCard p={p} />
               <MethodCard />
             </>
@@ -262,7 +264,7 @@ function MethodCard() {
             所有颜色与分数都由光路积分导出 —— 没有「高中低云加权」这类经验公式。
           </p>
         </div>
-        <span className="num shrink-0 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[9.5px] text-slate-400">
+        <span className="num shrink-0 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
           R_eff 7435km
         </span>
       </div>
@@ -270,18 +272,18 @@ function MethodCard() {
         {steps.map((s) => (
           <div key={s.n} className="rounded-xl border border-white/[0.07] bg-white/[0.022] p-2.5">
             <div className="flex items-center gap-1.5">
-              <span className="num text-[10px] font-bold text-amber-300/80">{s.n}</span>
+              <span className="num text-[11px] font-bold text-amber-300/80">{s.n}</span>
               <span className="text-[11px] font-semibold text-slate-200">{s.t}</span>
             </div>
-            <p className="mt-1 text-[10px] leading-relaxed text-slate-400/85 break-anywhere">{s.d}</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400/85 break-anywhere">{s.d}</p>
           </div>
         ))}
         <div className="rounded-xl border border-amber-300/20 bg-amber-300/[0.05] p-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold text-amber-300">★</span>
+            <span className="text-[11px] font-bold text-amber-300">★</span>
             <span className="text-[11px] font-semibold text-amber-100">紫霞二烧</span>
           </div>
-          <p className="mt-1 text-[10px] leading-relaxed text-amber-100/70 break-anywhere">
+          <p className="mt-1 text-[11px] leading-relaxed text-amber-100/70 break-anywhere">
             9.2km 卷云在太阳 α≈−3° 时仍处半受光（地影线低于云层），叠加高层散射尾 → 紫红余晖。不是特判，是几何必然。
           </p>
         </div>
@@ -294,10 +296,10 @@ function Footer() {
   return (
     <footer className="mt-8 flex flex-col items-center gap-1.5 text-center">
       <div className="divider w-full max-w-3xl" />
-      <p className="text-[10px] text-slate-600">
+      <p className="text-[11px] text-slate-600">
         数据：Open-Meteo（ECMWF IFS / NOAA GFS / DWD ICON）· CAMS 气溶胶 · Copernicus DEM 高程
       </p>
-      <p className="text-[9.5px] text-slate-700">
+      <p className="text-[11px] text-slate-700">
         AetherGlow 穹霞 · 免 Key 物理预测引擎 · 结果仅供摄影决策参考，不构成气象预报
       </p>
     </footer>

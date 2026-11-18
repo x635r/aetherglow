@@ -32,6 +32,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { predictSunset } from '../src/engine/SunsetPhysicsEngine';
 import { loadForecastBundle, resolveEvent } from '../src/data/openMeteo';
+import { fetchOzoneColumn } from '../src/data/ozone';
 import { GRADES } from '../src/engine/constants';
 import type { GradeKey } from '../src/engine/constants';
 import type { ModelId, SunMode } from '../src/engine/types';
@@ -366,6 +367,11 @@ async function main(): Promise<void> {
   // 秩相关保留连续观测强度；obsIdx 的离散副本只用于分类与混淆矩阵。
   const obsOrdinal: number[] = [];
   const skipped: string[] = [];
+  // 请求节流（第四轮 RES-12）：5000 单位/小时 ÷ 106.5 单位/次 ≈ 46 次，
+  // 取 90s 间隔（= 40 次/小时）留出余量，避免撞 429 截断回测。
+  const REQUEST_INTERVAL_MS = 90_000;
+  let requestCount = 0;
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   for (const row of rows) {
     const normalized = normalizeObservedLabel(row.label);
@@ -374,6 +380,11 @@ async function main(): Promise<void> {
       continue;
     }
     try {
+      // **速率节流**（第四轮 RES-12）：单次 `loadForecastBundle` 约 106.5 单位，
+      // Open-Meteo 免费额度 5000/小时 ≈ 46 次。上一版无间隔连发，
+      // 样本数 >45 行时必然触发 429，回测结果被截断成前 45 条。
+      if (requestCount > 0) await sleep(REQUEST_INTERVAL_MS);
+      requestCount++;
       const res = await loadForecastBundle({
         point: { lat: row.lat, lon: row.lon },
         dateISO: row.date,
@@ -382,6 +393,13 @@ async function main(): Promise<void> {
       });
       const resolved = resolveEvent({ lat: row.lat, lon: row.lon }, row.date, row.mode);
       const model: ModelId = 'ecmwf';
+      // **必须传臭氧**（第四轮 RES-12）：`predictSunset` 不传 `ozoneColumnDu`
+      // 时用 300 DU 气候值，而线上 UI 会先用 NASA POWER 的真实柱量。
+      // 不传则回测与线上是两套色相模型（Chappuis 带对红光的吸收差 ±30%）。
+      const ozone = await fetchOzoneColumn(
+        { lat: row.lat, lon: row.lon },
+        resolved.eventMs,
+      ).catch(() => null);
       const p = predictSunset({
         point: { lat: row.lat, lon: row.lon },
         mode: row.mode,
@@ -401,6 +419,8 @@ async function main(): Promise<void> {
             : { sunriseMs: null, sunsetMs: resolved.eventMs },
         eventExists: resolved.exists,
         compareModels: ['ecmwf', 'gfs', 'icon'],
+        // 与线上 UI 同一口径（第四轮 RES-12）
+        ozoneColumnDu: ozone?.totalColumnDu,
       });
       preds.push({
         date: row.date,

@@ -22,14 +22,26 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
   // 上一版取 `min(925hPa, 850hPa)`（≈780m）却把结果叫「低云顶」：
   // 925hPa 是云底参照，850hPa 才是云顶参照。判"机位是否越过云层"
   // 必须比云顶，否则会提示用户"还没越过"而其实早已在云上。
+  //
+  // **必须排除地下层**（第四轮 RES-10）：海拔 > 800m 的站点
+  // （昆明 1890m、西宁 2260m、拉萨 3650m）的 925hPa（≈780m）与
+  // 850hPa（≈1500m）都在岩石里。上一版直接读 `layers.find(...)`，
+  // 于是拉萨卡片底部写「低云底约 780m」—— 比地面还低 2870m。
+  // 引擎已经把地下层云量清零，UI 必须用同一口径。
+  const groundMsl = p.groundElevationM;
   const lowBase = useMemo(() => {
-    const l925 = p.layers.find((l) => l.key === '925')?.altitudeM ?? 780;
-    return l925;
-  }, [p.layers]);
+    const l925 = p.layers.find((l) => l.key === '925')?.altitudeM;
+    // 地下 → 退到下一档；都地下就用地面上第一层（或地面本身）
+    if (l925 != null && l925 > groundMsl + 50) return l925;
+    const l850 = p.layers.find((l) => l.key === '850')?.altitudeM;
+    if (l850 != null && l850 > groundMsl + 50) return l850;
+    return groundMsl + 50;
+  }, [p.layers, groundMsl]);
   const lowTop = useMemo(() => {
-    const l850 = p.layers.find((l) => l.key === '850')?.altitudeM ?? 1500;
-    return Math.max(lowBase, l850);
-  }, [p.layers, lowBase]);
+    const l850 = p.layers.find((l) => l.key === '850')?.altitudeM;
+    const top = l850 != null && l850 > groundMsl + 50 ? l850 : lowBase;
+    return Math.max(lowBase, top);
+  }, [p.layers, lowBase, groundMsl]);
 
   // **必须用 MSL 比较，不能用 AGL**。
   // 上一版写的是 `h > lowBase`（AGL 对 MSL），于是拉萨这类高原城市
@@ -64,7 +76,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
 
   return (
     <Panel
-      className="col-span-full lg:col-span-6 xl:col-span-4"
+      className="col-span-full xl:col-span-5"
       title="摄影师机位战术"
       subtitle="改变机位高度会实时重算低云遮挡与云海反转"
       right={<InfoTip text="AGL = Above Ground Level（离地高度）。无人机法规上限通常 120m，本工具支持 0–2000m 用于模拟高山/航拍机位。" />}
@@ -74,14 +86,14 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <DroneIcon />
-            <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-slate-300">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">
               机位高度模拟器
             </span>
           </div>
           <button
             type="button"
             onClick={resetObserverHeight}
-            className="rounded-md border border-white/10 px-1.5 py-0.5 text-[9.5px] text-slate-400 transition-colors hover:border-amber-300/40 hover:text-amber-200"
+            className="rounded-md border border-white/10 px-1.5 py-0.5 text-[11px] text-slate-400 transition-colors hover:border-amber-300/40 hover:text-amber-200"
           >
             归零
           </button>
@@ -91,12 +103,12 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
           <span className="num text-2xl font-bold leading-none text-amber-300">{h}</span>
           <span className="text-[11px] text-slate-400">m AGL</span>
           {p.groundElevationM > 1 && (
-            <span className="num text-[9.5px] text-slate-500">
+            <span className="num text-[11px] text-slate-500">
               → {Math.round(p.observerHeightM)}m MSL
             </span>
           )}
           <span
-            className="ml-auto rounded-md px-1.5 py-0.5 text-[9.5px] font-medium"
+            className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] font-medium"
             style={{
               background: aboveLow ? 'rgba(56,232,208,0.14)' : 'rgba(255,179,64,0.13)',
               color: aboveLow ? '#38e8d0' : '#ffb340',
@@ -122,7 +134,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
               key={pr.v}
               type="button"
               onClick={() => setObserverHeight(pr.v)}
-              className={`text-[9px] transition-colors ${
+              className={`text-[11px] transition-colors ${
                 Math.abs(h - pr.v) <= 30 ? 'font-bold text-amber-300' : 'text-slate-500 hover:text-slate-300'
               }`}
             >
@@ -132,7 +144,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
         </div>
 
         {/* 状态判定 */}
-        <div className="mt-2.5 space-y-1 text-[10.5px] leading-snug">
+        <div className="mt-2.5 space-y-1 text-[11px] leading-snug">
           {hasLowCloud ? (
             <StatusLine
               ok={aboveCloudBase}
@@ -179,18 +191,18 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
       <div className="mt-3 rounded-xl border border-white/[0.08] bg-white/[0.028] p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-[9.5px] font-semibold uppercase tracking-[0.12em] text-slate-500">建议焦段</div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">建议焦段</div>
             <div className="mt-1 font-display text-[15px] font-semibold text-slate-100">{p.tactical.focalLength}</div>
           </div>
           <div className="shrink-0 text-right">
-            <div className="text-[9.5px] font-semibold uppercase tracking-[0.12em] text-slate-500">拍摄朝向</div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">拍摄朝向</div>
             <div className="num mt-1 text-[13px] font-semibold text-amber-200">{p.tactical.directionLabel}</div>
           </div>
         </div>
-        <p className="mt-2 text-[10.5px] leading-relaxed text-slate-400 break-anywhere">{p.tactical.focalReason}</p>
+        <p className="mt-2 text-[11px] leading-relaxed text-slate-400 break-anywhere">{p.tactical.focalReason}</p>
         <div className="mt-2.5 flex items-center gap-2">
           <CompassRose deg={p.tactical.directionDeg} />
-          <div className="min-w-0 flex-1 space-y-0.5 text-[10px] text-slate-400">
+          <div className="min-w-0 flex-1 space-y-0.5 text-[11px] text-slate-400">
             <div className="truncate">{p.tactical.exposureHint}</div>
             <div className="truncate">{p.tactical.compositionHint}</div>
           </div>
@@ -200,7 +212,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
       {/* ── 丁达尔 ── */}
       <div className="mt-3 rounded-xl border border-white/[0.08] bg-white/[0.028] p-3">
         <div className="flex items-center justify-between">
-          <span className="text-[9.5px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
             丁达尔光 / 霞光道
           </span>
           <span
@@ -213,7 +225,7 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
         <div className="mt-1.5">
           <Bar value={p.tactical.godRayProbability} max={1} color="#ffd68a" height={5} glow={p.tactical.godRayProbability > 0.5} />
         </div>
-        <p className="mt-1.5 text-[10px] leading-relaxed text-slate-400 break-anywhere">{p.tactical.godRayNote}</p>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400 break-anywhere">{p.tactical.godRayNote}</p>
       </div>
 
       {/* ── 顶部时间线摘要 ── */}
@@ -222,10 +234,10 @@ export function TacticalCard({ p }: { p: SunsetPredictionOutput }) {
         <TimeChip label="曝光" value={gradeExposure(p)} />
         <TimeChip label="ISO" value={p.spectral.aod > 0.5 ? '100 · 去雾' : '100 · 长曝'} />
       </div>
-      <div className="mt-2 flex items-start gap-1.5 text-[10px] leading-snug text-slate-500">
+      <div className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-slate-500">
         <span className="mt-0.5 shrink-0 text-amber-300/70">※</span>
         <span className="break-anywhere">
-          {p.tactical.isoHint} 低云底约 {Math.round(lowBase)}m（925hPa）、云顶约 {Math.round(lowTop)}m（850hPa）。
+          {p.tactical.isoHint} {lowDeckText(lowBase, lowTop, groundMsl)}。
         </span>
       </div>
     </Panel>
@@ -243,7 +255,7 @@ function StatusLine({ ok, text, accent }: { ok: boolean; text: string; accent?: 
   return (
     <div className="flex items-start gap-1.5">
       <span
-        className="mt-[3px] grid h-3 w-3 shrink-0 place-items-center rounded-full text-[7px] font-bold"
+        className="mt-[3px] grid h-3 w-3 shrink-0 place-items-center rounded-full text-[11px] font-bold"
         style={{ background: `${color}22`, color }}
       >
         {ok ? '✓' : '!'}
@@ -282,7 +294,7 @@ function CompassRose({ deg }: { deg: number }) {
         </g>
         <circle cx="32" cy="32" r="1.8" fill="rgba(255,255,255,0.5)" />
       </svg>
-      <span className="absolute -top-0.5 text-[7px] font-bold text-slate-500">N</span>
+      <span className="absolute -top-0.5 text-[11px] font-bold text-slate-500">N</span>
     </div>
   );
 }
@@ -296,7 +308,7 @@ function TimeChip({ label, value, accent }: { label: string; value: string; acce
         background: accent ? 'rgba(255,179,64,0.09)' : 'rgba(255,255,255,0.025)',
       }}
     >
-      <div className="text-[8.5px] uppercase tracking-[0.1em] text-slate-500">{label}</div>
+      <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">{label}</div>
       <div className="num mt-0.5 truncate text-[11px] font-semibold" style={{ color: accent ? '#ffd68a' : 'rgba(226,236,250,0.9)' }}>
         {value}
       </div>
@@ -315,4 +327,26 @@ function DroneIcon() {
       <circle cx="13" cy="13" r="1.6" />
     </svg>
   );
+}
+
+/**
+ * 低云底/顶文案。
+ *
+ * 必须**同时给出海拔与离地高度**（第四轮 RES-10）：
+ * 高原站点只报 MSL 会让人以为「780m 的云在地面上」，而拉萨地面就有 3650m。
+ * 只报 AGL 又对不上气象报文口径。两者并列才没有歧义。
+ */
+function lowDeckText(lowBaseM: number, lowTopM: number, groundMslM: number): string {
+  const aglOf = (msl: number) => Math.max(Math.round(msl - groundMslM), 0);
+  const lowAgl = aglOf(lowBaseM);
+  const topAgl = aglOf(lowTopM);
+  // 高原上 925/850hPa 均在地下时的兜底形态
+  if (lowAgl <= 0 && topAgl <= 0) {
+    return `本站地面 ${Math.round(groundMslM)}m 已在低云等压面之上，低云层位于山下`;
+  }
+  const base = `低云底约 ${Math.round(lowBaseM)}m（海拔）/ 距地 ${lowAgl}m`;
+  const top = topAgl > lowAgl
+    ? `，云顶约 ${Math.round(lowTopM)}m / 距地 ${topAgl}m`
+    : '';
+  return `${base}${top}`;
 }

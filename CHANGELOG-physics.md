@@ -939,3 +939,140 @@ faint 被抬成 minor（V 0.0967 → 0.1339）—— 光路本该穿越 450km �
 - 水晶天徽标硬编码 ×1.25（实际是 1.15–1.27 连续值）→ 读 `saturationGain`。
 - README 分档表还是旧的 7 档，与 `constants.ts` 的 10 档矛盾 → 换成 10 档对照表。
 - 环标签 tooltip 的「远端 T」→「受光比例」。
+
+---
+
+## 第六轮：针对 `3fafd82` 的 12 项审查 + 前端重设计
+
+外部审查针对已部署的 `3fafd82`，逐行核查 + 线上浏览器实测给出 12 项
+（3 项 P0 / 8 项 P1 / 2 项 P2），并附一份对标 Apple Weather / Linear / Stripe
+的前端重设计规范。**12 项全部复核确认属实**（第三轮也是 100% 命中）。
+
+### P0
+
+**NEW-01 散射天窗漏算本层，100% 满铺密云仍「天窗全开」**
+
+`effectiveIllumination` 的 `skyOpening` 循环 `if (other === target) continue`，
+本层完全不参与漫射遮挡。600hPa 单层 100% 密云绵延 450km 时，直射 τ 已达 20
+（`tDirect≈0.004`），但 `skyOpening` 仍是 1.0，那 0.85 的散射权重把被挡掉的光
+原样补了回来 —— 实测有效照明度 **0.857**（审查文档算得 0.949，相态因子取值不同，
+机制一致）。
+
+修法有两步，**第二步是审查没提但必须做的**：
+
+1. 本层云幕按**垂直**光学厚度的中点衰减参与 `skyOpening`。
+   不能用掠射的 `perLevelTau`（沿 80km 水平斜程的 τ），那会把云块压成全黑。
+2. 其它层的 `skyOpening *= 1 − c` 一并改成按**每层自己的透过率**累乘。
+   原式中「凡有云处一律不透光」对卷云完全错：300hPa 满铺卷云 `τ_full` 只有 0.87，
+   直射都还有 42% 能穿过，却被当成只剩 10% 的天窗。这才是「加一层卷云必然掉档」
+   的真正原因。
+
+封堵只在**云隙闭合**后生效（`smoothstep(0.70, 1.00, c)`）。破碎云（c≈0.45）
+时仍有 55% 天穹敞开，漫射主场是那片天空而不是这层云 —— 把它一起乘掉会
+使「45% 黄金层 + 卷云」从 0.91 掉到 0.79，制造的新错比修的旧错更严重。
+（中间试过直接 `exp(−τ_vert/2)` 全量封堵、审查建议的 `1−0.72·c^1.35`、
+`c^3` 形状、以及把 `τ` 系数从 0.5 调到 0.35 —— 0.35 能让所有锚点过关，
+但那是**为了让测试通过而调参**，没有物理依据，已放弃。）
+
+验证：单层 100% 满铺 t_eff 0.857 → **0.0001**；40% 破碎黄金层 0.9678（不变）
+→ 10 个校准锚点全部在区间内。
+
+**NEW-02 `coverAtObserverDistance` 注释与实现矛盾（是我的错，但修法不是改代码）**
+
+上一轮我在 `rayForRing` 写下「超出最后采样环后**按线性衰减**返回覆盖率」，
+而函数体一直是 `return last.cover[key]` —— 注释与实现自相矛盾，指控成立。
+
+但**正确修法是改注释**：按审查建议实现线性衰减后实测更糟 ——
+末尾 450km 环的上游再无采样点，衰减后 τ→0，T 从 0.75 跳回 **1.00**，
+破坏「环透过率随距离单调不增」（两个既有测试立刻失败）。
+且单点模式（`maxRingKm=0`）下任何衰减都等于「本地云量向外迅速归零」，
+而模式的单点序列就是我们对这片大气的全部信息 ——
+持续性外推是「同一片大气换采样分辨率得同一个答案」这条不变量的唯一支撑。
+上一轮 P1-6 也已量化过反方向（`maxRangeKm` 截断）的代价：整层阴天 700hPa
+从 faint 抬成 minor（V 0.0967→0.1339）。
+
+结论：保留持续性外推，注释如实描述它，并说明为什么**不**衰减。
+
+**NEW-03 朝霞 `cotRef` 取 `max(bestAlt, midAlt)` 高估 2.7–5.0°**
+
+Open-Meteo 的 `shortwave/terrestrial` 是**前一小时平均**，时间戳 t 的辐射值
+对应 t−30min 的太阳几何。晚霞时太阳在下降，`midAlt > bestAlt`，
+取 max 碰巧等于 midAlt（所以这个 bug 在晚霞侧完全看不见）；
+朝霞时太阳在上升，`midAlt < bestAlt`，取 max 就锁死在偏高的 instantaneous 角上。
+
+实测高估量：上海 5.0° / 北京 3.8° / 哈尔滨 2.7°（晚霞三城均为 0.0°）。
+后果链：alt 偏大 → `T_clear` 偏大 → `R/T_clear` 偏小 → COT 系统性偏大 →
+透光的朝霞云被判成黑云。
+
+修法与审查建议略有不同：不只是返回值用 `midAlt`，
+**搜索循环的判据也一并改成 `midAlt`** —— 否则等于「按一个时刻选数据、
+按另一个时刻算太阳」，朝霞挑到偏高的时刻、晚霞偏保守，两边都不自洽。
+
+### P1 / P2
+
+- **NEW-04** `InfoTip` 的 `align` 从 `'center'|'right'` 扩成 `'left'|'center'|'right'`，
+  HeroScore 左上角的「鲜艳度指数」显式 `align="left"`；外层容器的
+  `overflow-hidden` 下沉到 `absolute inset-0 pointer-events-none rounded-[22px]`
+  背景层。浏览器实测 `clippers === []`，224px 气泡左缘 114.8 > 卡片左缘 20。
+- **NEW-05** `sectionRenderer` 的 `padR` 在 `width ≥ 720` 时 20 → **34**。
+  9px 时代这个滑块刚好挤进去，升到 11px 后「1000」需要 22.4px 而起点在
+  `width−17`，实测被裁成「100」。
+- **NEW-06** `CloudProfileCard` 从「10 根竖向柱 + 10 个 X 轴标签」改成
+  **横向条形图**，行序 200→1000hPa 与剖面图 Y 轴同序，并 `h-full` 让 10 行
+  均分卡片高度。原先在 `xl:col-span-2`（内容区 186px）里标签间距只剩 20.2px。
+- **NEW-07** 新增 `COMPASS_CN16` / `compassCn16` / `compassName16`，
+  按**中国气象局**规范（`北偏东 / 东北偏北 / 西南偏西`）取代原先
+  英文 NE-by-N 的字面直译（`北东北 / 东东南 / 西西南`）。
+  HeroScore 自带的 8 方位函数删除，改调 `compassName16` ——
+  同一页面顶部「西南」、下方「西西南」的双体系问题消失。
+- **RES-08** `backfillModelScalars` 的整场 `some(...)` 跳过改成
+  **逐环逐时次**判断；`borrowScalar` 跳过 `scalarValid === false` 的样本
+  （原先会把插值的兜底 0 当真实值加权）。
+- **RES-09** `directBeamAirmass` 新增 `groundElevationM` 参数：
+  气溶胶标高 1.5km 的基准面是**地面**（AGL），不是海平面。
+  拉萨 3650m 的 4.2km 云原按 `exp(−4.2/1.5)=0.062` 算，正确值
+  `exp(−0.55/1.5)=0.69` —— **低估 11.4 倍消光**。Rayleigh 与臭氧仍用 MSL。
+- **RES-10** `TacticalCard` 的 `lowBase`/`lowTop` 排除地下层
+  （`altitudeM > groundElevationM + 50`），页脚同时给出海拔与离地高度。
+- **RES-11** 缓存键改用固定全集 `MODEL_ALL`，不再拼调用方的 `models` 子集 ——
+  否则关掉某模型再切城市、重新勾选时会触发三模型全量重请求。
+- **RES-12** `tools/validate.ts` 补传 `ozoneColumnDu`（与线上同一色相模型）、
+  按 90s 间隔节流（5000 单位/小时 ÷ 106.5 ≈ 46 次，取 40 次/小时留余量）。
+
+### 前端重设计
+
+**设计令牌**（`styles/index.css`）：`--bg-obsidian` / `--surface-glass-1` /
+`--surface-well` / `--surface-popover` / `--border-specular` / 三级文本 /
+`--glow-dynamic-rgb`。`.glass` 从「白色 4.5% 叠加」改为**有色深曜石渐变** +
+`inset 0 1px 0 rgba(255,255,255,0.14)` 的 Linear 式 Top-Lit Specular Border，
+圆角 22→24px（与内层 16px 容器形成同心关系）。
+
+**11px 可读性底线**：101 处 `text-[7/7.5/8/8.5/9/9.5/10/10.5px]` 全部升到 11px；
+Canvas 的 `ctx.font` 9/9.5/10px 共 11 处升到 11px；SVG 的 `fontSize`
+按 viewBox 缩放比换算（SkyMap 6.5→12，Gauge 6.5→9）。
+浏览器实测 `main` 内最小实际字号 **11.0px**。
+
+**12 列 Bento 重排**：
+Row1 Hero 12 · Row2 剖面 8 + 云廓线 4 · Row3 时间轴 7 + 战术 5 ·
+Row4 诊断工作台 6 · Row5 热力 4 + 方法 8。
+图表卡最小跨度从 `col-span-2`（218px）提到 `col-span-4`（约 430px）。
+
+**渐进披露**：新增 `DiagnosticsStudio`，把《光谱与色温》《物理拆解》
+《多源一致性》三张平铺卡合并为一张 6 列卡 + `role="tablist"` 分段切换
+（默认光谱）。并新增 `SpectralCurve`：380–780nm 地面到达光谱曲线，
+由 AOD / 湿度 / 臭氧**实际计算**，不是示意图。
+
+### 顺带修掉的既有移动端 bug
+
+375px 下 HeroScore 的三块指标（综合评分 / 会烧概率 / 等级）并排撑到 395px，
+`document.scrollWidth` 实测 **792**。加 `flex-wrap` + `min-w-0` 后降到 **366**。
+
+### 验证
+
+- `npm.cmd test`：10 文件 / **304** 项全通过（新增 6 项 P0 回归）
+- `npm.cmd run typecheck`：无错误
+- `npm.cmd run build`：450.93 kB / gzip 157.16 kB
+- `tsx scratch/anchor-baseline.ts`：10 个校准锚点全在区间内
+- `tsx scratch/r4-probe.ts`：NEW-01 三种构型全部符合物理
+- 浏览器 1440px / 375px 实测：右轴 `1000` 完整、InfoTip `clippers=[]`、
+  最小字号 11.0px、无横向溢出

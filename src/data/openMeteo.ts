@@ -32,6 +32,15 @@ export const MODEL_META: Record<ModelId, { api: string; label: string; short: st
   icon: { api: 'icon_seamless', label: 'DWD ICON Seamless', short: 'ICON', color: '#a855f7' },
 };
 
+/**
+ * 全部模型（固定顺序，作为缓存键与请求的基准）。
+ *
+ * 缓存键**必须**用它而不是调用方传入的 `models` 子集：否则用户
+ * 关掉某个模型再切换城市，重新勾选该模型时缓存键不匹配，会触发
+ * 三模型全量重请求（第四轮 RES-11）。见 `cacheKey` 处注释。
+ */
+export const MODEL_ALL: ModelId[] = ['ecmwf', 'gfs', 'icon'];
+
 const FORECAST_BASE = 'https://api.open-meteo.com/v1/forecast';
 const AIR_BASE = 'https://air-quality-api.open-meteo.com/v1/air-quality';
 const ELEV_BASE = 'https://api.open-meteo.com/v1/elevation';
@@ -685,7 +694,16 @@ export async function loadForecastBundle(opts: LoadOptions): Promise<LoadResult>
     point.lon.toFixed(4),
     dateISO,
     mode,
-    models.slice().sort().join('-'),
+    // **缓存必须按「全集」而不是「当前选中的子集」建键**（第四轮 RES-11）。
+    //
+    // 上一版拼 `models.slice().sort().join('-')`：用户先关掉 ICON 再切城市，
+    // 之后重新勾选 ICON 时键变成 `ecmwf-gfs-icon`，与之前的键不匹配 ——
+    // 触发全量 3 模型重新请求（约 106.5 单位），白白浪费配额。
+    //
+    // 改成固定全集后，同一地点/日期的缓存对任意子集都命中；
+    // `hydrate` 再按调用方要的 `models` 投影出对应的数据集。
+    // 这样开关模型只影响内存里的对比，不影响网络请求。
+    MODEL_ALL.join('-'),
   ].join('|');
 
   const isPast = Date.parse(`${dateISO}T00:00:00Z`) < Date.now() - 86400000;
@@ -898,14 +916,27 @@ function backfillModelScalars(datasets: Record<ModelId, ModelDataset>, models: M
       .filter((d) => d?.rings?.length);
 
     for (const field of fields) {
-      const hasAny = ds.rings.some((r) => r.samples.some((s) => (s[field] ?? 0) > 0));
-      if (hasAny) continue;
+      // **逐环逐时次回填**，不能用整场 `some(...)` 一刀切（第四轮 RES-08）。
+      //
+      // 上一版：`hasAny = ds.rings.some(r => r.samples.some(s => s[field] > 0))`，
+      // 只要 48 小时序列里**任意一个**样本非零就 `continue` 跳过整个模型。
+      // 但真实缺测是局部的：GFS 的 boundary_layer_height 常在夜间为 0（模式
+      // 输出的合法物理值），若日落窗口恰好在夜间，整条回填被跳过，
+      // 引擎只能退回兜底常量。
+      //
+      // 现在缺口按 (环, 时次) 粒度判断，并且**只补真正的缺失** ——
+      // 已有的 0 若 scalarValid 为 true（模式确实报了 0，例如夜间边界层）
+      // 不当成缺测，避免用别的模型覆盖一个合法的物理零值。
       for (const ring of ds.rings) {
         const donorRing = donors
           .map((d) => d.rings.find((r) => r.ringKm === ring.ringKm))
           .find((r) => r && r.samples.some((s) => (s[field] ?? 0) > 0));
         if (!donorRing) continue;
+        // 捐赠方的时间序列只排序一次（原来在内层每次都重扫）
         for (const sample of ring.samples) {
+          const own = sample[field] ?? 0;
+          const ownValid = sample.scalarValid?.[field] ?? own > 0;
+          if (own > 0 || ownValid) continue;
           // 找时间最近的多方样本
           let best: HourlySample | null = null;
           let bestDt = Infinity;

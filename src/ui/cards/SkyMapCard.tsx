@@ -66,7 +66,7 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
 
   return (
     <Panel
-      className="col-span-full sm:col-span-6 lg:col-span-3 xl:col-span-2"
+      className="col-span-full xl:col-span-4"
       title="区域火烧云分布"
       subtitle={`朝向 ${az.toFixed(0)}° · 0–450km`}
       right={<InfoTip text="极坐标雷达：圆心是观测者，向外 450km 是真实大圆距离。扇叶颜色 = 该环「受光云幕得分」（云量 × 受光 × 透过率）。红 = 地形阻断。" />}
@@ -88,7 +88,7 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
               x={cx + rOf(km) - 1}
               y={cy - 2.5}
               textAnchor="end"
-              fontSize="6.5"
+              fontSize="12"
               fill="rgba(130,150,172,0.7)"
               fontFamily="JetBrains Mono, monospace"
             >
@@ -138,7 +138,7 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
               x={cx + Math.cos(rad) * (R + 8)}
               y={cy + Math.sin(rad) * (R + 8) + 2.5}
               textAnchor="middle"
-              fontSize="7"
+              fontSize="12"
               fontWeight="700"
               fill="rgba(160,180,205,0.8)"
               fontFamily="Inter, system-ui"
@@ -154,7 +154,7 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
       </svg>
 
       {/* 图例 */}
-      <div className="mt-1 flex items-center justify-center gap-2.5 text-[8px] text-slate-500">
+      <div className="mt-1 flex items-center justify-center gap-2.5 text-[11px] text-slate-500">
         <span className="flex items-center gap-1">
           <span className="h-1.5 w-2.5 rounded-sm bg-orange-500/85" />大烧
         </span>
@@ -174,7 +174,7 @@ export function SkyMapCard({ p }: { p: SunsetPredictionOutput }) {
           .sort((a, b) => b.score - a.score)
           .slice(0, 3)
           .map((r) => (
-            <div key={r.ringKm} className="flex items-center gap-1.5 text-[9px]">
+            <div key={r.ringKm} className="flex items-center gap-1.5 text-[11px]">
               <span className="num w-9 shrink-0 text-slate-500">{r.ringKm}km</span>
               <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.07]">
                 <div

@@ -621,13 +621,24 @@ export function directBeamAirmass(
   cloudMslM: number,
   alphaDeg: number,
   maxDistKm = 900,
+  /** 观测点/云下地面高程 MSL (m)。缺省 0 = 海平面 */
+  groundElevationM = 0,
 ): { rayleigh: number; aerosol: number; rangeKm: number } {
   const tangentM = beamTangentHeightM(cloudMslM, alphaDeg);
   // 光束几何可达的水平半程 L/2 = √(2·R_eff·h_t)；乘 2 得往返全程
   const reachKm = tangentM > 0 ? 2 * Math.sqrt(2 * R_EFF_KM * (tangentM / 1000)) : 0;
+  // **气溶胶标高是相对地面的（AGL），不是海拔（MSL）**（第四轮 RES-09）。
+  //
+  // 瑞利散射由整层大气气压决定、臭氧在平流层，两者都以 MSL 为准；
+  // 但气溶胶集中在贴地边界层，H_AEROSOL=1.5km 这个标高的基准面是**地面**。
+  //
+  // 上一版对气溶胶也传了 cloudMslM：拉萨（地面 3650m）的 4.2km 云，
+  // 气溶胶气柱按 exp(−4.2/1.5)=0.062 算，而正确值应是
+  // exp(−0.55/1.5)=0.69 —— **低估 11.4 倍消光**，高原晚霞被算得异常偏黄亮。
+  const hAglM = Math.max(cloudMslM - groundElevationM, 0);
   return {
     rayleigh: beamAirmass(cloudMslM, alphaDeg, H_RAYLEIGH),
-    aerosol: beamAirmass(cloudMslM, alphaDeg, H_AEROSOL),
+    aerosol: beamAirmass(hAglM, alphaDeg, H_AEROSOL),
     rangeKm: Math.min(reachKm, maxDistKm),
   };
 }
@@ -830,8 +841,13 @@ export function directSunRgb(
   rh = 55,
   /** 实际臭氧总柱量 (DU)；缺省用 300 DU 标准值 */
   ozoneColumnDu = OZONE_REFERENCE_DU,
+  /**
+   * 云下地面高程 MSL (m)。气溶胶标高以地面为基准（AGL），
+   * 高原站点的 Path 1 气溶胶消光靠它修正 —— 见 `directBeamAirmass`。
+   */
+  groundElevationM = 0,
 ): { rgb: RgbColor; rayleighAirmass: number; aerosolAirmass: number; rangeKm: number } {
-  const { rayleigh, aerosol, rangeKm } = directBeamAirmass(cloudMslM, alphaDeg);
+  const { rayleigh, aerosol, rangeKm } = directBeamAirmass(cloudMslM, alphaDeg, 900, groundElevationM);
   const hygro = 1 + Math.pow(clamp((rh - 55) / 45, 0, 1), 2) * 1.15;
   const tauO3Vert = tauO3FromColumn(ozoneColumnDu);
   // 臭氧走**自己的**球壳几何，不跟 Rayleigh 共用气柱（P1 修复）。

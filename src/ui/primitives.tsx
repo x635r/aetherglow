@@ -56,14 +56,14 @@ export function Metric({
   const vs = size === 'lg' ? 'text-2xl sm:text-3xl' : size === 'sm' ? 'text-base' : 'text-xl';
   return (
     <div className="min-w-0">
-      <div className="text-[10px] font-medium uppercase tracking-[0.13em] text-slate-400/85">{label}</div>
+      <div className="text-[11px] font-medium uppercase tracking-[0.13em] text-slate-400/85">{label}</div>
       <div className="mt-1 flex items-baseline gap-1">
         <span className={`num ${vs} font-semibold leading-none`} style={{ color: accent }}>
           {value}
         </span>
         {unit && <span className="text-[11px] font-medium text-slate-400/90">{unit}</span>}
       </div>
-      {hint && <div className="mt-1 text-[10.5px] leading-tight text-slate-400/70 break-anywhere">{hint}</div>}
+      {hint && <div className="mt-1 text-[11px] leading-tight text-slate-400/70 break-anywhere">{hint}</div>}
     </div>
   );
 }
@@ -246,20 +246,41 @@ export function Segmented<T extends string>({
  * 带 tooltip 的信息点。
  *
  * **默认向下展开**（P1 修复）：卡片头部的 ? 图标离卡片上边缘只有 14px，
- * 向上弹出的气泡必然被裁掉。改成 `top-full right-0` 后气泡落在卡片内部，
+ * 向上弹出的气泡必然被裁掉。改成向下后气泡落在卡片内部，
  * 不再依赖任何祖先的 overflow 设置。
  *
- * 同时补上 `tabIndex` 与 `group-focus-within`：上一版只响应 hover，
+ * `align` 控制**水平**展开方向，必须按图标在卡片里的位置选：
+ *   · `right`（默认）从图标向右延伸 —— 适合卡片右侧的 ? 图标
+ *   · `left`  从图标向左延伸 —— 适合卡片**左边缘**的标题旁（如 HeroScore
+ *     的「鲜艳度指数」距左边界仅 85px，向右展开 224px 会溢出 139px）
+ *   · `center` 以图标为中心
+ *
+ * 第四轮 NEW-04：上一版只有一个 `right-0` 默认值，把它当成通用方向，
+ * 于是 HeroScore 左上角的说明框被切掉左半截。方向必须由调用点声明 ——
+ * 组件拿不到父容器的实际边界，靠猜只会在另一个方向再错一次。
+ *
+ * 同时保留 `tabIndex` 与 `group-focus-within`：上一版只响应 hover，
  * 键盘 Tab 与移动端触屏都无法触发。
  */
-export function InfoTip({ text, align = 'right' }: { text: string; align?: 'center' | 'right' }) {
-  const pos = align === 'right' ? 'right-0 top-full mt-2' : 'left-1/2 top-full mt-2 -translate-x-1/2';
+export function InfoTip({
+  text,
+  align = 'right',
+}: {
+  text: string;
+  align?: 'left' | 'center' | 'right';
+}) {
+  const pos =
+    align === 'right'
+      ? 'right-0 top-full mt-2'
+      : align === 'left'
+        ? 'left-0 top-full mt-2'
+        : 'left-1/2 top-full mt-2 -translate-x-1/2';
   return (
     <span
       tabIndex={0}
       className="group/tip relative inline-flex cursor-help align-middle focus:outline-none"
     >
-      <span className="grid h-3.5 w-3.5 place-items-center rounded-full border border-white/20 text-[8px] font-bold leading-none text-slate-400 transition-colors group-hover/tip:border-amber-300/60 group-hover/tip:text-amber-300 group-focus-within/tip:border-amber-300/60 group-focus-within/tip:text-amber-300">
+      <span className="grid h-3.5 w-3.5 place-items-center rounded-full border border-white/20 text-[11px] font-bold leading-none text-slate-400 transition-colors group-hover/tip:border-amber-300/60 group-hover/tip:text-amber-300 group-focus-within/tip:border-amber-300/60 group-focus-within/tip:text-amber-300">
         ?
       </span>
       <span

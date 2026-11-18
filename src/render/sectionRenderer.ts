@@ -73,7 +73,11 @@ export function renderSection(
   });
 
   const padL = width < 520 ? 42 : 56;
-  const padR = width < 520 ? 12 : 20;
+  // 右轴标签「1000」在 9px JetBrains Mono 下约 22.4px 宽，文字从
+  // `padL + plotW + 3` 起画。padR 只有 20 时起点落在 width−17，
+  // 第 4 个字符直接跑到画布外（线上实测被裁成「100」）。
+  // 34px 留出 14px 余量；窄屏走 labelsInside 分支不受影响。
+  const padR = width < 520 ? 12 : width < 720 ? 20 : 34;
   const padT = width < 520 ? 20 : 26;
   const padB = width < 520 ? 30 : 34;
   const plotW = Math.max(width - padL - padR, 10);
@@ -172,7 +176,7 @@ export function renderSection(
   ctx.stroke();
 
   // 地形标注（仅明显起伏）
-  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.font = '11px "JetBrains Mono", monospace';
   ctx.textAlign = 'left';
   for (const p of terrainPts.slice(1)) {
     if (p.terr >= 300) {
@@ -390,7 +394,7 @@ export function renderSection(
     ctx.stroke();
 
     const label = `地形遮蔽 ${blocked}km`;
-    ctx.font = '600 10px "Inter", system-ui, sans-serif';
+    ctx.font = '600 11px "Inter", system-ui, sans-serif';
     const tw = ctx.measureText(label).width;
     const lx = Math.min(Math.max(bx - tw / 2 - 7, padL + 3), padL + plotW - tw - 17);
     roundRect(ctx, lx, by - 27, tw + 14, 19, 6);
@@ -483,18 +487,18 @@ export function renderSection(
     ctx.fillText(`${LEVEL_BY_KEY[focusLevel].hpa}hPa 已入地影`, bx + boxW / 2, by + (next ? 20 : 27));
 
     if (next) {
-      ctx.font = '9.5px "JetBrains Mono", monospace';
+      ctx.font = '11px "JetBrains Mono", monospace';
       ctx.fillStyle = 'rgba(255, 214, 150, 0.9)';
       ctx.fillText(
         `最高受光层 ${LEVEL_BY_KEY[next.key].hpa}hPa · ${(next.heightM / 1000).toFixed(1)}km`,
         bx + boxW / 2,
         by + 36,
       );
-      ctx.font = '9px "Inter", system-ui, sans-serif';
+      ctx.font = '11px "Inter", system-ui, sans-serif';
       ctx.fillStyle = 'rgba(150, 170, 196, 0.8)';
       ctx.fillText('点击上方层按钮切换观察', bx + boxW / 2, by + 50);
     } else {
-      ctx.font = '9px "Inter", system-ui, sans-serif';
+      ctx.font = '11px "Inter", system-ui, sans-serif';
       ctx.fillStyle = 'rgba(150, 170, 196, 0.8)';
       ctx.fillText('全部云层已入影 · 此刻只剩天边余晖', bx + boxW / 2, by + 36);
     }
@@ -531,7 +535,7 @@ export function renderSection(
   ctx.lineTo(padL + plotW, plotBottom + 0.5);
   ctx.stroke();
 
-  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.font = '11px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   for (const r of section.profile.rings) {
     const x = xOf(r.ringKm);
@@ -556,7 +560,7 @@ export function renderSection(
     ctx.lineTo(padL, y);
     ctx.strokeStyle = 'rgba(255,255,255,0.22)';
     ctx.stroke();
-    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.font = '11px "JetBrains Mono", monospace';
     ctx.fillStyle = 'rgba(158, 178, 202, 0.78)';
     ctx.fillText(`${alt}`, padL - 8, y + 3);
   }
@@ -567,7 +571,7 @@ export function renderSection(
     const y = yOf(lv.heightM);
     if (y < padT + 6 || y > plotBottom - 3) continue;
     const isFocus = lv.key === focusLevel;
-    ctx.font = `${isFocus ? '700 ' : ''}9px "JetBrains Mono", monospace`;
+    ctx.font = `${isFocus ? '700 ' : ''}11px "JetBrains Mono", monospace`;
     if (labelsInside) {
       ctx.textAlign = 'right';
       ctx.fillStyle = isFocus ? 'rgba(255, 214, 150, 0.98)' : 'rgba(150, 170, 196, 0.55)';
@@ -584,7 +588,7 @@ export function renderSection(
   ctx.translate(11, padT + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
-  ctx.font = '9.5px "Inter", system-ui, sans-serif';
+  ctx.font = '11px "Inter", system-ui, sans-serif';
   ctx.fillStyle = 'rgba(126, 146, 172, 0.8)';
   ctx.fillText('海拔 (km MSL)', 0, 0);
   ctx.restore();
@@ -593,7 +597,7 @@ export function renderSection(
   const info = `α ${alpha >= 0 ? '+' : ''}${alpha.toFixed(2)}°  ${LEVEL_BY_KEY[focusLevel].hpa}hPa  τ ${section.ray.opticalDepth
     .toFixed(2)
     .padStart(4, '0')}  受光 ${((section.levels.find((l) => l.key === focusLevel)?.lit ?? 0) * 100).toFixed(0)}%`;
-  ctx.font = '600 9.5px "JetBrains Mono", monospace';
+  ctx.font = '600 11px "JetBrains Mono", monospace';
   const iw = ctx.measureText(info).width + 15;
   roundRect(ctx, padL + plotW - iw - 4, padT + 5, iw, 19, 6);
   ctx.fillStyle = 'rgba(5, 8, 15, 0.78)';
