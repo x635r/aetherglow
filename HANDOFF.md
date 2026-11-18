@@ -7,7 +7,7 @@
 第六轮审查（针对 `3fafd82`）的 **12 项缺陷全部复核确认并修复**
 （3 P0 / 8 P1 / 2 P2），并完成对标 Apple Weather / Linear 的前端重设计。
 
-- 分支 `main`
+- 分支 `main`，HEAD `373d3a6`
 - 生产站 https://aetherglow.pages.dev（部署后核对 `index-*.js` 哈希）
 - **GitHub 推送不会自动触发 Pages 构建**，仍需手动 `wrangler pages deploy dist`
 
@@ -17,10 +17,10 @@
 | --- | --- |
 | `npm.cmd test` | 10 文件 / 304 项，全通过 |
 | `npm.cmd run typecheck` | 通过，无错误 |
-| `npm.cmd run build` | 成功；JS 450.93 kB / gzip 157.16 kB |
+| `npm.cmd run build` | 成功；JS 450.96 kB / gzip 157.18 kB |
 | `tsx scratch/anchor-baseline.ts` | 10 个校准锚点全部在区间内 |
 | `tsx scratch/r4-probe.ts` | NEW-01 三种构型全部符合物理 |
-| 浏览器 1440px / 375px | 右轴 `1000` 完整、InfoTip 无裁剪、最小字号 11.0px、无横向溢出 |
+| 浏览器 1440px / 375px（线上） | 右轴 `1000` 完整、InfoTip `clippers=[]`、HTML 最小 11.0px、SVG 有效最小 11.0px、`scrollWidth` 1431<1440、375px 下 366<375 |
 
 ## P0 修复要点（详见 `CHANGELOG-physics.md` 第六轮）
 
